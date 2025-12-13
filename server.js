@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 // Load env at startup (we also re-try inside requests to handle late-created .env files).
 dotenv.config();
 
-const app = express();
+export const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static('public'));
 
@@ -298,23 +298,28 @@ app.post('/api/generate-batch', async (req, res) => {
   }
 });
 
-const server = app.listen(port, () => {
-  const present = !!getApiKey();
-  console.log(`AI report app running: http://localhost:${port}`);
-  console.log(`[env] cwd=${process.cwd()}`);
-  console.log(`[env] OPENAI_API_KEY ${present ? 'detected' : 'missing'}`);
-});
+// Only start a real HTTP server locally. On Vercel, this file is loaded as a serverless function.
+if (!process.env.VERCEL) {
+  const server = app.listen(port, () => {
+    const present = !!getApiKey();
+    console.log(`AI report app running: http://localhost:${port}`);
+    console.log(`[env] cwd=${process.cwd()}`);
+    console.log(`[env] OPENAI_API_KEY ${present ? 'detected' : 'missing'}`);
+  });
 
-server.on('error', (err) => {
-  if (err && typeof err === 'object' && 'code' in err && err.code === 'EADDRINUSE') {
-    console.error(`[ERROR] Port ${port} is already in use.`);
-    console.error(
-      '[FIX] Stop the other process using this port, or start with a different port (PowerShell: $env:PORT="3001"; npm start).',
-    );
+  server.on('error', (err) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EADDRINUSE') {
+      console.error(`[ERROR] Port ${port} is already in use.`);
+      console.error(
+        '[FIX] Stop the other process using this port, or start with a different port (PowerShell: $env:PORT="3001"; npm start).',
+      );
+      process.exit(1);
+    }
+    console.error('[ERROR] Server failed to start:', err);
     process.exit(1);
-  }
-  console.error('[ERROR] Server failed to start:', err);
-  process.exit(1);
-});
+  });
+}
+
+export default app;
 
 
