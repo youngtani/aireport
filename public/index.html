@@ -12,6 +12,7 @@
         <div>
           <div class="eyebrow">테스트용</div>
           <h1 class="title">AI 수업 리포트 생성기</h1>
+          <p class="subtitle">녹음 &rarr; 자동 변환 &rarr; AI 리포트</p>
         </div>
         <div class="header-actions">
           <button id="btnReset" class="btn btn-ghost" type="button">초기화</button>
@@ -19,6 +20,7 @@
       </header>
 
       <main class="grid">
+        <!-- Column 1: Student info + Recording -->
         <section class="card">
           <div class="card-title">기본 정보</div>
 
@@ -30,7 +32,7 @@
                 <span>여러 학생(배치)로 생성</span>
               </label>
             </div>
-            <div class="hint">배치 모드에서는 아래에서 여러 학생/책을 한 번에 입력하고 “Generate all”로 생성합니다.</div>
+            <div class="hint">배치 모드에서는 아래에서 여러 학생/책을 한 번에 입력하고 "Generate all"로 생성합니다.</div>
           </div>
 
           <div class="field">
@@ -50,6 +52,44 @@
           <div class="field">
             <label class="label" for="pagesOrChapter">범위(선택)</label>
             <input id="pagesOrChapter" class="control" type="text" placeholder="예: 3장 / p. 25-40" />
+          </div>
+
+          <!-- Voice Recording Section -->
+          <div class="divider"></div>
+          <div class="card-title small">수업 대화 녹음</div>
+          <div class="hint" style="margin-top:0;margin-bottom:10px">수업 중 대화를 녹음하면 Whisper가 자동으로 텍스트로 변환합니다.</div>
+
+          <div class="recorder">
+            <div class="recorder-controls">
+              <button id="btnRecord" class="btn btn-record" type="button">
+                <span class="record-dot"></span> 녹음 시작
+              </button>
+              <button id="btnStopRecord" class="btn btn-stop" type="button" disabled>
+                녹음 중지
+              </button>
+              <span id="recordTimer" class="record-timer">00:00</span>
+            </div>
+            <div id="recordingIndicator" class="recording-indicator" hidden>
+              <span class="pulse-dot"></span> 녹음 중...
+            </div>
+
+            <div id="audioPlayback" class="audio-playback" hidden>
+              <audio id="audioPlayer" controls></audio>
+              <div class="row" style="margin-top:8px">
+                <button id="btnTranscribe" class="btn btn-primary" type="button">텍스트 변환 (Whisper)</button>
+                <button id="btnDiscardAudio" class="btn btn-ghost" type="button">녹음 삭제</button>
+              </div>
+            </div>
+            <div id="transcribeStatus" class="status" aria-live="polite"></div>
+          </div>
+
+          <div class="field" style="margin-top:12px">
+            <label class="label" for="transcript">녹취록 (자동 변환 또는 직접 입력)</label>
+            <textarea
+              id="transcript"
+              class="control textarea"
+              placeholder="녹음 후 '텍스트 변환'을 누르면 여기에 자동으로 채워집니다. 직접 입력/수정도 가능합니다."
+            ></textarea>
           </div>
 
           <div id="batchSection" class="batch" hidden>
@@ -85,6 +125,7 @@
           </div>
         </section>
 
+        <!-- Column 2: Phrases/words + actions -->
         <section class="card">
           <div class="row row-between">
             <div class="card-title">자주쓰는 문구/단어</div>
@@ -135,10 +176,11 @@
               class="control textarea"
               placeholder="예: 어려운 단어 5개 복습, 과거시제/관계대명사 설명, 등장인물 감정 질문으로 토론"
             ></textarea>
-            <div class="hint">여기에 사실 위주로 적으면 더 ‘맞춤형’ 리포트가 됩니다.</div>
+            <div class="hint">여기에 사실 위주로 적으면 더 '맞춤형' 리포트가 됩니다.</div>
           </div>
 
           <div class="actions">
+            <button id="btnGenerateFromTranscript" class="btn btn-accent" type="button">녹취록으로 리포트 생성</button>
             <button id="btnGenerate" class="btn btn-primary" type="button">Make report</button>
             <button id="btnGenerateAll" class="btn btn-primary" type="button" hidden>Generate all</button>
             <button id="btnCopy" class="btn btn-secondary" type="button" disabled>복사</button>
@@ -147,10 +189,11 @@
           <div id="status" class="status" aria-live="polite"></div>
         </section>
 
+        <!-- Full-width: Results -->
         <section class="card card-wide">
           <div class="card-title">결과</div>
           <textarea id="output" class="control textarea output" placeholder="여기에 리포트가 생성됩니다"></textarea>
-          <div class="hint">필요하면 직접 수정해도 되고, 아래 채팅으로 AI에게 “이렇게 바꿔줘”라고 요청해도 됩니다.</div>
+          <div class="hint">필요하면 직접 수정해도 되고, 아래 채팅으로 AI에게 "이렇게 바꿔줘"라고 요청해도 됩니다.</div>
           <div id="batchResults" class="history"></div>
 
           <div id="editChatSection" hidden>
@@ -211,5 +254,3 @@
     <script src="/app.js" defer></script>
   </body>
 </html>
-
-

@@ -1,13 +1,27 @@
 import express from 'express';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 // Load env at startup (we also re-try inside requests to handle late-created .env files).
 dotenv.config();
 
 export const app = express();
-app.use(express.json({ limit: '1mb' }));
-app.use(express.static('public'));
+app.use(express.json({ limit: '10mb' }));
+
+// Serve React build if available, fall back to legacy public/
+const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'dist');
+const publicDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'public');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+} else {
+  app.use(express.static(publicDir));
+}
+
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 
@@ -227,6 +241,108 @@ app.post('/api/edit', async (req, res) => {
   }
 });
 
+// --- Whisper transcription ---
+app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+  try {
+    if (!getApiKey()) {
+      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file uploaded.' });
+    }
+
+    const client = createClient();
+    const ext = req.file.originalname?.split('.').pop() || 'webm';
+    const newPath = req.file.path + '.' + ext;
+    fs.renameSync(req.file.path, newPath);
+
+    try {
+      const transcription = await client.audio.transcriptions.create({
+        model: 'whisper-1',
+        file: fs.createReadStream(newPath),
+        language: req.body?.language || undefined,
+      });
+
+      return res.json({ text: transcription.text || '' });
+    } finally {
+      try { fs.unlinkSync(newPath); } catch {}
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return res.status(500).json({ error: message });
+  }
+});
+
+// --- Generate report from transcript ---
+app.post('/api/generate-from-transcript', async (req, res) => {
+  try {
+    if (!getApiKey()) {
+      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
+    }
+
+    const studentName = asNonEmptyString(req.body?.studentName);
+    const bookTitle = asNonEmptyString(req.body?.bookTitle);
+    const transcript = asNonEmptyString(req.body?.transcript);
+    const additionalNotes = asNonEmptyString(req.body?.additionalNotes);
+    const tone = asNonEmptyString(req.body?.tone, '따뜻하고 긍정적');
+    const length = asNonEmptyString(req.body?.length, '짧게(4~6문장)');
+
+    if (!studentName) return res.status(400).json({ error: 'studentName is required' });
+    if (!transcript) return res.status(400).json({ error: 'transcript is required' });
+
+    const client = createClient();
+
+    const system = [
+      '당신은 학부모에게 보내는 과외 수업 리포트를 작성하는 한국어 작가입니다.',
+      '튜터와 학생의 대화 녹취록을 읽고, 학부모에게 보내는 자연스러운 수업 리포트를 작성해 주세요.',
+      '',
+      '규칙:',
+      '- 녹취록에서 수업 내용, 학생 반응, 읽은 책/범위, 학습 포인트를 파악해 반영한다.',
+      '- 대화체가 아닌 학부모에게 보내는 메시지 형태로 자연스럽게 작성한다.',
+      '- 말투는 친근하지만 예의 바르게, 이모지/특수문자 남발 금지.',
+      '- 오늘 수업에서 한 활동(읽기/복습/문법/토론 등)을 구체적으로 포함한다.',
+      '- 학생의 반응/흥미 포인트를 포함한다.',
+      '- 다음 수업 계획을 1문장 포함한다.',
+      '- 마지막은 격려 멘트로 마무리한다.',
+      '- 출력은 한 개의 문단으로, 줄바꿈 최소.',
+    ].join('\n');
+
+    const user = [
+      `학생 이름: ${studentName}`,
+      bookTitle ? `오늘 읽은 책: ${bookTitle}` : null,
+      '',
+      '--- 수업 대화 녹취록 ---',
+      transcript,
+      '--- 녹취록 끝 ---',
+      additionalNotes ? `\n추가 메모: ${additionalNotes}` : null,
+      `\n원하는 톤: ${tone}`,
+      `길이: ${length}`,
+    ].filter(Boolean).join('\n');
+
+    const response = await client.responses.create({
+      model: 'gpt-4.1-nano',
+      input: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    });
+
+    const text =
+      response.output_text ||
+      response.output?.map((o) => o?.content?.map((c) => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') ||
+      '';
+
+    if (!text.trim()) {
+      return res.status(502).json({ error: 'Empty response from model' });
+    }
+
+    return res.json({ text });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return res.status(500).json({ error: message });
+  }
+});
+
 app.get('/api/ping', (req, res) => {
   return res.json({ ok: true });
 });
@@ -296,6 +412,14 @@ app.post('/api/generate-batch', async (req, res) => {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return res.status(500).json({ error: message });
   }
+});
+
+// SPA fallback: serve index.html for non-API routes
+app.get('*', (req, res) => {
+  const indexPath = fs.existsSync(distDir)
+    ? path.join(distDir, 'index.html')
+    : path.join(publicDir, 'index.html');
+  res.sendFile(indexPath);
 });
 
 // Only start a real HTTP server locally. On Vercel, this file is loaded as a serverless function.
