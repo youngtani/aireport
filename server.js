@@ -56,16 +56,36 @@ async function fbRegisterTutor(name, password) {
   return ref.id;
 }
 
-/* ── Simple session tokens (in-memory) ── */
-const sessions = new Map(); // token -> { tutor, expires }
+/* ── Session tokens (Firestore-backed) ── */
 function generateToken() {
   return Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, '0')).join('');
 }
-function authMiddleware(req, res, next) {
+
+async function fbCreateSession(token, tutor, expiresMs) {
+  if (!db) return;
+  await db.collection('sessions').doc(token).set({
+    tutor,
+    expires: Date.now() + expiresMs,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function fbGetSession(token) {
+  if (!db || !token) return null;
+  const doc = await db.collection('sessions').doc(token).get();
+  if (!doc.exists) return null;
+  const data = doc.data();
+  if (data.expires < Date.now()) {
+    db.collection('sessions').doc(token).delete().catch(() => {});
+    return null;
+  }
+  return data;
+}
+
+async function authMiddleware(req, res, next) {
   const token = req.headers['x-auth-token'];
-  const session = sessions.get(token);
-  if (!session || session.expires < Date.now()) {
-    sessions.delete(token);
+  const session = await fbGetSession(token);
+  if (!session) {
     return res.status(401).json({ error: 'Unauthorized — please log in' });
   }
   req.tutorName = session.tutor;
@@ -81,9 +101,17 @@ app.post('/api/login', async (req, res) => {
     if (!tutor || tutor.password !== password) return res.status(401).json({ error: '이름 또는 비밀번호가 틀렸습니다.' });
     if (!tutor.approved) return res.status(403).json({ error: '승인 대기 중입니다. 관리자에게 문의하세요.' });
     const token = generateToken();
-    sessions.set(token, { tutor: name, expires: Date.now() + 24 * 60 * 60 * 1000 }); // 24h
+    await fbCreateSession(token, name, 24 * 60 * 60 * 1000); // 24h
     return res.json({ token, tutor: name });
   } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/logout', async (req, res) => {
+  const token = req.headers['x-auth-token'];
+  if (token && db) {
+    db.collection('sessions').doc(token).delete().catch(() => {});
+  }
+  return res.json({ ok: true });
 });
 
 app.post('/api/register', async (req, res) => {

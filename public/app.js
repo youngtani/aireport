@@ -51,6 +51,9 @@ function showApp() {
   boot();
 }
 function logout() {
+  if (authToken) {
+    fetch('/api/logout', { method: 'POST', headers: { 'X-Auth-Token': authToken } }).catch(() => {});
+  }
   authToken = '';
   tutorName = '';
   localStorage.removeItem(LOCAL.token);
