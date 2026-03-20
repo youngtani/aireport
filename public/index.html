@@ -3,213 +3,135 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI 수업 리포트 생성기</title>
+    <title>수업 리포트</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app">
       <header class="header">
-        <div>
-          <div class="eyebrow">테스트용</div>
-          <h1 class="title">AI 수업 리포트 생성기</h1>
-        </div>
-        <div class="header-actions">
-          <button id="btnReset" class="btn btn-ghost" type="button">초기화</button>
-        </div>
+        <h1 class="title">수업 리포트</h1>
+        <button id="btnReset" class="btn btn-ghost" type="button">초기화</button>
       </header>
 
-      <main class="grid">
-        <section class="card">
-          <div class="card-title">기본 정보</div>
+      <!-- Global memo -->
+      <section class="card">
+        <div class="card-title">전체 메모</div>
+        <div class="field">
+          <textarea id="globalMemo" class="control textarea-compact" placeholder="모든 학생에게 공통으로 적용할 메모 (예: 오늘 수업 방식, 공통 활동 등)"></textarea>
+          <div class="hint">여기에 적은 내용은 모든 학생의 코멘트 생성 시 참고됩니다.</div>
+        </div>
+      </section>
 
+      <!-- 1. Student name -->
+      <section class="card">
+        <div class="card-title">학생 이름</div>
+        <div class="field">
+          <div class="row">
+            <input id="studentName" class="control" type="text" placeholder="예: 이수" />
+            <button id="btnSaveStudent" class="btn btn-secondary" type="button">저장</button>
+          </div>
+          <div class="student-chips" id="studentChips"></div>
+        </div>
+      </section>
+
+      <!-- 2. Book title -->
+      <section class="card">
+        <div class="card-title">책 제목</div>
+        <div class="field">
+          <input id="bookTitle" class="control" type="text" placeholder="예: Norma Jean, Jumping Bean" />
+        </div>
+        <div class="field">
+          <label class="label" for="pagesOrChapter">범위 (선택)</label>
+          <input id="pagesOrChapter" class="control" type="text" placeholder="예: Chapter 6-9 / p.25-40" />
+        </div>
+      </section>
+
+      <!-- 3. Voice recording & transcription -->
+      <section class="card">
+        <div class="card-title">녹음 & 텍스트 변환</div>
+        <div class="record-section">
+          <div class="record-row">
+            <button id="btnRecord" class="btn btn-record" type="button">녹음 시작</button>
+            <span id="recordStatus" class="record-status"></span>
+          </div>
           <div class="field">
-            <label class="label" for="batchMode">모드</label>
-            <div class="row">
-              <label class="toggle">
-                <input id="batchMode" type="checkbox" />
-                <span>여러 학생(배치)로 생성</span>
-              </label>
-            </div>
-            <div class="hint">배치 모드에서는 아래에서 여러 학생/책을 한 번에 입력하고 “Generate all”로 생성합니다.</div>
+            <label class="label" for="transcription">변환된 텍스트 / 수업 대화 내용</label>
+            <textarea id="transcription" class="control textarea transcription-box" placeholder="녹음 후 변환된 텍스트가 여기에 표시됩니다. 직접 입력하거나 붙여넣기도 가능합니다."></textarea>
           </div>
+        </div>
+      </section>
 
-          <div class="field">
-            <label class="label" for="studentSelect">학생</label>
-            <div class="row">
-              <select id="studentSelect" class="control"></select>
-              <button id="btnManageStudents" class="btn btn-secondary" type="button">목록 관리</button>
-            </div>
-            <div class="hint">학생 목록은 브라우저에 저장됩니다(로컬 저장).</div>
-          </div>
+      <!-- 4. Student memo -->
+      <section class="card">
+        <div class="card-title">학생 메모</div>
+        <div class="field">
+          <textarea id="studentMemo" class="control textarea-compact" placeholder="이 학생에 대한 메모 (예: 레벨, 성향, 주의사항 등). 학생별로 자동 저장됩니다."></textarea>
+          <div class="hint">학생 이름 클릭 시 해당 학생의 메모가 자동으로 불러와집니다.</div>
+        </div>
+      </section>
 
-          <div class="field">
-            <label class="label" for="bookTitle">오늘 읽은 책 제목</label>
-            <input id="bookTitle" class="control" type="text" placeholder="예: 앵무새 죽이기" />
-          </div>
+      <!-- 5. Additional notes -->
+      <section class="card">
+        <div class="card-title">추가 메모 (선택)</div>
+        <div class="field">
+          <textarea id="tutorNotes" class="control textarea-compact" placeholder="예: 에세이 주제는 ~~, 단어 시험 7/10 등"></textarea>
+        </div>
+      </section>
 
-          <div class="field">
-            <label class="label" for="pagesOrChapter">범위(선택)</label>
-            <input id="pagesOrChapter" class="control" type="text" placeholder="예: 3장 / p. 25-40" />
-          </div>
+      <!-- 6. Past student comments -->
+      <section class="card">
+        <div class="card-title">이 학생의 과거 코멘트</div>
+        <div class="hint" style="margin-top:0; margin-bottom:8px">AI가 과거 코멘트를 참고하여 더 일관된 코멘트를 생성합니다.</div>
+        <div id="studentPastComments" class="history">
+          <div class="hint">학생을 선택하면 과거 코멘트가 표시됩니다.</div>
+        </div>
+      </section>
 
-          <div id="batchSection" class="batch" hidden>
-            <div class="divider"></div>
-            <div class="row row-between">
-              <div class="card-title small">배치 입력 (학생별 세션)</div>
-              <div class="row">
-                <button id="btnAddRow" class="btn btn-secondary" type="button">행 추가</button>
-                <button id="btnAdd7Rows" class="btn btn-ghost" type="button">전체 학생 추가</button>
-                <button id="btnClearRows" class="btn btn-ghost" type="button">초기화</button>
-              </div>
-            </div>
-            <div class="hint">각 행: 학생/책/범위/개인 메모를 입력하세요. (문구 chips + 톤/길이 + 공통 메모는 모든 학생에게 공통 적용)</div>
-            <div id="batchRows" class="batch-rows"></div>
-          </div>
+      <!-- 7. Generate -->
+      <section class="card">
+        <div class="actions" style="margin-top:0">
+          <button id="btnGenerate" class="btn btn-primary" type="button">코멘트 생성</button>
+          <button id="btnCopy" class="btn btn-secondary" type="button" disabled>복사</button>
+        </div>
+        <div id="status" class="status" aria-live="polite"></div>
 
-          <div class="field">
-            <label class="label" for="tone">톤</label>
-            <select id="tone" class="control">
-              <option value="따뜻하고 긍정적" selected>따뜻하고 긍정적</option>
-              <option value="담백하고 간단">담백하고 간단</option>
-              <option value="조금 더 격식 있게">조금 더 격식 있게</option>
-            </select>
-          </div>
+        <div class="field" style="margin-top:14px">
+          <label class="label" for="output">결과</label>
+          <textarea id="output" class="control textarea output" placeholder="여기에 학부모 코멘트가 생성됩니다"></textarea>
+        </div>
 
-          <div class="field">
-            <label class="label" for="length">길이</label>
-            <select id="length" class="control">
-              <option value="짧게(4~6문장)" selected>짧게(4~6문장)</option>
-              <option value="보통(6~9문장)">보통(6~9문장)</option>
-              <option value="길게(9~12문장)">길게(9~12문장)</option>
-            </select>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="row row-between">
-            <div class="card-title">자주쓰는 문구/단어</div>
-          </div>
-          <div class="hint">학생별로 저장됩니다. 클릭=포함, 삭제=저장 목록에서 제거</div>
-
-          <div class="field" style="margin-top:10px">
-            <label class="label" for="newPhrase">문구 추가</label>
-            <div class="row">
-              <textarea id="newPhrase" class="control textarea textarea-compact" placeholder="예: 오늘은 ~을 중심으로 수업했습니다."></textarea>
-              <button id="btnAddPhrase" class="btn btn-secondary" type="button">추가</button>
-            </div>
-          </div>
-
-          <div class="pillbox-container">
-            <div class="pillbox" id="phraseBox"></div>
-          </div>
-
-          <div class="field" style="margin-top:12px">
-            <label class="label" for="newWord">단어 추가</label>
-            <div class="row">
-              <input id="newWord" class="control" type="text" placeholder="예: infer / persuade / summarize" />
-              <button id="btnAddWord" class="btn btn-secondary" type="button">추가</button>
-            </div>
-            <div class="hint">여러 개를 한 번에 추가하려면 쉼표(,)로 구분해서 입력해도 됩니다.</div>
-          </div>
-
-          <div class="pillbox-container">
-            <div class="pillbox" id="wordBox"></div>
-          </div>
-
-          <div class="field" style="margin-top:12px">
-            <label class="label" for="selectedPoints">포함될 포인트(자동)</label>
-            <textarea
-              id="selectedPoints"
-              class="control textarea textarea-points"
-              placeholder="문구/단어 chips를 클릭하면 여기에 자동으로 쌓입니다."
-              readonly
-            ></textarea>
-            <div class="hint">배치 모드에서는 각 행의 학생 프로필(선택된 포인트)이 자동으로 적용됩니다.</div>
-          </div>
-
+        <!-- Chat edit -->
+        <div id="editChatSection" hidden>
           <div class="divider"></div>
-          <div class="field">
-            <label class="label" for="tutorNotes">추가 메모(선택)</label>
-            <textarea
-              id="tutorNotes"
-              class="control textarea"
-              placeholder="예: 어려운 단어 5개 복습, 과거시제/관계대명사 설명, 등장인물 감정 질문으로 토론"
-            ></textarea>
-            <div class="hint">여기에 사실 위주로 적으면 더 ‘맞춤형’ 리포트가 됩니다.</div>
-          </div>
-
-          <div class="actions">
-            <button id="btnGenerate" class="btn btn-primary" type="button">Make report</button>
-            <button id="btnGenerateAll" class="btn btn-primary" type="button" hidden>Generate all</button>
-            <button id="btnCopy" class="btn btn-secondary" type="button" disabled>복사</button>
-            <button id="btnCopyAll" class="btn btn-secondary" type="button" hidden disabled>전체 복사</button>
-          </div>
-          <div id="status" class="status" aria-live="polite"></div>
-        </section>
-
-        <section class="card card-wide">
-          <div class="card-title">결과</div>
-          <textarea id="output" class="control textarea output" placeholder="여기에 리포트가 생성됩니다"></textarea>
-          <div class="hint">필요하면 직접 수정해도 되고, 아래 채팅으로 AI에게 “이렇게 바꿔줘”라고 요청해도 됩니다.</div>
-          <div id="batchResults" class="history"></div>
-
-          <div id="editChatSection" hidden>
-            <div class="divider"></div>
-            <div class="card-title small">AI로 결과 수정(채팅)</div>
-            <div class="chat">
+          <div class="card-title small">AI로 결과 수정</div>
+          <div class="chat">
             <div id="editChatMessages" class="chat-messages" aria-live="polite"></div>
             <div class="chat-actions">
-              <textarea
-                id="editChatInput"
-                class="control textarea textarea-chat"
-                placeholder="예: 마지막 문장을 더 따뜻하게 바꿔줘 / 문장 길이를 조금 줄여줘 / 단어 2개를 자연스럽게 포함해줘"
-              ></textarea>
+              <textarea id="editChatInput" class="control textarea-chat" placeholder="예: 마지막 문장을 더 따뜻하게 바꿔줘"></textarea>
               <div class="row chat-buttons">
                 <button id="btnEditSend" class="btn btn-primary" type="button">AI 수정</button>
                 <button id="btnEditUndo" class="btn btn-secondary" type="button" disabled>되돌리기</button>
                 <button id="btnEditClear" class="btn btn-ghost" type="button">대화 지우기</button>
               </div>
-              <div class="hint">현재 결과 텍스트를 기준으로 수정됩니다. (모델: gpt-4o-mini)</div>
             </div>
           </div>
-          </div>
+        </div>
 
-          <div class="divider"></div>
-          <details id="historyDetails" class="details">
-            <summary class="details-summary">
-              <span class="card-title small" style="margin:0">최근 생성 기록</span>
-              <span class="details-hint">클릭해서 열기</span>
-            </summary>
-            <div class="row row-between" style="margin-top:10px">
-              <div class="hint" style="margin:0">최근 20개까지 저장됩니다(로컬 저장).</div>
-              <button id="btnClearHistory" class="btn btn-ghost" type="button">기록 삭제</button>
-            </div>
-            <div id="history" class="history"></div>
-          </details>
-        </section>
-      </main>
+        <div class="divider"></div>
+        <details id="historyDetails" class="details">
+          <summary class="details-summary">
+            <span class="card-title small" style="margin:0">최근 생성 기록</span>
+            <span class="details-hint">클릭해서 열기</span>
+          </summary>
+          <div class="row row-between" style="margin-top:8px">
+            <div class="hint" style="margin:0">최근 20개까지 저장됩니다.</div>
+            <button id="btnClearHistory" class="btn btn-ghost" type="button">기록 삭제</button>
+          </div>
+          <div id="history" class="history"></div>
+        </details>
+      </section>
     </div>
-
-    <!-- Student manager modal -->
-    <dialog id="studentDialog" class="dialog">
-      <form method="dialog" class="dialog-inner">
-        <div class="dialog-title">학생 목록 관리</div>
-        <div class="field">
-          <label class="label" for="newStudent">학생 추가</label>
-          <div class="row">
-            <input id="newStudent" class="control" type="text" placeholder="예: 현성이" />
-            <button id="btnAddStudent" class="btn btn-primary" type="button">추가</button>
-          </div>
-        </div>
-        <div class="list" id="studentList"></div>
-        <div class="dialog-actions">
-          <button class="btn btn-secondary" value="cancel">닫기</button>
-        </div>
-      </form>
-    </dialog>
 
     <script src="/app.js" defer></script>
   </body>
 </html>
-
-

@@ -1,120 +1,110 @@
 import express from 'express';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import { Readable } from 'stream';
 
-// Load env at startup (we also re-try inside requests to handle late-created .env files).
 dotenv.config();
 
 export const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static('public'));
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 function getApiKey() {
-  // If the user creates/edits .env after the server started, this gives us a chance to pick it up.
   dotenv.config();
   const key = process.env.OPENAI_API_KEY;
   return typeof key === 'string' ? key.trim() : '';
 }
 
 function createClient() {
-  const apiKey = getApiKey();
-  return new OpenAI({ apiKey: apiKey || 'missing' });
+  return new OpenAI({ apiKey: getApiKey() || 'missing' });
 }
 
 function asNonEmptyString(value, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-function norm(s) {
-  return String(s || '').toLowerCase();
-}
+// --- Transcription endpoint ---
+// We use express raw body parsing for multipart audio
+import multer from 'multer';
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-function missingWords(text, words) {
-  const hay = norm(text);
-  const missing = [];
-  for (const w of words || []) {
-    const t = typeof w === 'string' ? w.trim() : '';
-    if (!t) continue;
-    if (!hay.includes(norm(t))) missing.push(t);
-  }
-  return missing;
-}
+app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+  try {
+    if (!getApiKey()) {
+      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file provided' });
+    }
 
-function createLimiter(concurrency) {
-  let active = 0;
-  const queue = [];
-  const next = () => {
-    if (active >= concurrency) return;
-    const job = queue.shift();
-    if (!job) return;
-    active++;
-    Promise.resolve()
-      .then(job.fn)
-      .then(job.resolve, job.reject)
-      .finally(() => {
-        active--;
-        next();
-      });
-  };
-  return (fn) =>
-    new Promise((resolve, reject) => {
-      queue.push({ fn, resolve, reject });
-      next();
+    const client = createClient();
+    // Convert buffer to a File-like object for OpenAI
+    const file = new File([req.file.buffer], req.file.originalname || 'audio.webm', {
+      type: req.file.mimetype || 'audio/webm',
     });
-}
 
-async function generateOne({
-  studentName,
-  bookTitle,
-  pagesOrChapter,
-  selectedPhrases,
-  selectedWords,
-  tutorNotes,
-  tone,
-  length,
-}) {
+    const transcription = await client.audio.transcriptions.create({
+      model: 'whisper-1',
+      file: file,
+      language: 'ko',
+    });
+
+    return res.json({ text: transcription.text || '' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Transcription error';
+    return res.status(500).json({ error: message });
+  }
+});
+
+// --- Generate comment ---
+const SYSTEM_PROMPT = `당신은 독서학원 선생님이 학부모에게 보내는 수업 코멘트를 작성하는 전문 작가입니다.
+
+아래 규칙을 반드시 따르세요:
+
+1. 대화 내용을 꼼꼼히 읽고 핵심 정보를 파악하세요: 책 제목, 학생이 설명한 줄거리, 등장인물, 배경, 배운 어휘, 학생이 작성한 문장, 시험 점수, 특별한 순간 등.
+
+2. 아래 형식을 따르세요:
+   - "오늘 [이름]은/는 [책 제목]을/를 읽었습니다." 로 시작
+   - 책의 내용에 대한 간단한 소개
+   - 학생이 정확히 파악한 것들 (등장인물, 배경 등)
+   - 배운 어휘 단어들
+   - 에세이 관련 내용 (매일 에세이를 쓰는데, 이 부분이 가장 중요합니다. 에세이에서 어떤 내용을 썼는지, 어떤 피드백을 받았는지 자세히 다뤄주세요)
+   - 학생이 만든 문장들
+   - 마지막은 학생의 이름을 부르며 격려하는 멘트로 마무리
+
+3. 톤은 따뜻하고 격려하며, 학부모에게 오늘 아이가 수업에서 무엇을 했는지 구체적으로 보여주세요.
+
+4. 출력은 한 개의 문단으로 작성하세요. 줄바꿈 최소화. 이모지/특수문자 사용 금지.
+
+5. 자연스러운 한국어로 작성하되, 영어 책 제목, 단어, 문장은 영어 그대로 표기하세요.
+
+6. 과거 코멘트가 제공된 경우, 톤과 스타일의 일관성을 유지하되 내용은 반드시 오늘 수업 기준으로 새로 작성하세요. 과거 코멘트의 내용을 그대로 반복하지 마세요.
+
+7. 전체 메모나 학생 메모가 제공된 경우, 해당 정보를 참고하여 더 맞춤형 코멘트를 작성하세요.`;
+
+async function generateOne({ studentName, bookTitle, pagesOrChapter, transcription, tutorNotes, studentMemo, globalMemo, pastComments }) {
   const client = createClient();
-  const phrases = Array.isArray(selectedPhrases) ? selectedPhrases.slice(0, 8) : [];
-  const words = Array.isArray(selectedWords) ? selectedWords.slice(0, 10) : [];
 
-  const system = [
-    '당신은 학부모에게 보내는 과외 수업 리포트를 작성하는 한국어 작가입니다.',
-    '입력된 사실을 자연스럽게 연결해 주세요.',
-    '말투는 친근하지만 예의 바르게, 이모지/특수문자 남발은 금지합니다.',
-    '출력은 한 개의 문단(줄바꿈 최소)로, 마지막은 격려 멘트로 마무리합니다.',
-    '',
-    '중요 규칙(반드시 지키기):',
-    '- 선택한 "문구"는 문장 그대로 복붙이 아니어도 되지만, 핵심 내용이 리포트에 분명히 드러나게 반영한다.',
-    '- 선택한 "단어/키워드"는 철자 그대로 리포트 본문에 반드시 포함한다(가능하면 자연스럽게).',
-    '- 누락되면 전체를 다시 작성해 조건을 만족시킨다(출력에는 수정된 최종 리포트만).',
-  ].join('\n');
-
-  const user = [
+  const userParts = [
     `학생 이름: ${studentName}`,
     `오늘 읽은 책: ${bookTitle}`,
-    pagesOrChapter ? `범위(선택): ${pagesOrChapter}` : null,
-    phrases.length ? `필수 반영(선택 문구 · 내용 반영):\n- ${phrases.join('\n- ')}` : null,
-    words.length ? `필수 포함(선택 단어/키워드 · 철자 그대로):\n- ${words.join('\n- ')}` : null,
-    tutorNotes ? `추가 메모(사실 위주): ${tutorNotes}` : null,
-    `원하는 톤: ${tone}`,
-    `길이: ${length}`,
-    '',
-    '요구사항:',
-    '- 학부모에게 보내는 메시지 형태로 자연스럽게 작성',
-    '- 오늘 수업에서 한 활동(읽기/복습/문법/토론 등)을 구체적으로 2~4개 포함',
-    '- 학생의 반응/흥미 포인트를 1개 포함(입력된 내용이 없으면 일반적으로 표현)',
-    '- 다음 수업 계획을 1문장으로 포함',
-  ]
-    .filter(Boolean)
-    .join('\n');
+    pagesOrChapter ? `범위: ${pagesOrChapter}` : null,
+    globalMemo ? `[전체 메모 - 모든 학생 공통]\n${globalMemo}` : null,
+    studentMemo ? `[학생 메모 - ${studentName} 전용]\n${studentMemo}` : null,
+    transcription ? `수업 대화 내용:\n${transcription}` : null,
+    tutorNotes ? `추가 메모: ${tutorNotes}` : null,
+    pastComments && pastComments.length
+      ? `[이 학생의 과거 코멘트 (참고용 - 톤과 스타일을 유지하되 내용은 오늘 수업 기준으로 작성)]\n${pastComments.join('\n---\n')}`
+      : null,
+  ].filter(Boolean).join('\n\n');
 
   const response = await client.responses.create({
-    model: 'gpt-4.1-nano',
+    model: 'gpt-5',
     input: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userParts },
     ],
   });
 
@@ -129,71 +119,47 @@ async function generateOne({
 async function editOne({ originalText, instruction }) {
   const client = createClient();
   const system = [
-    '당신은 한국어 과외 수업 리포트를 "편집"하는 도우미입니다.',
-    '입력된 원문을 기반으로, 사용자의 편집 지시사항을 반영해 자연스럽게 다듬어 주세요.',
+    '당신은 한국어 수업 리포트를 편집하는 도우미입니다.',
+    '원문을 기반으로 사용자의 편집 지시사항을 반영해 자연스럽게 다듬어 주세요.',
     '의미/정보를 임의로 크게 바꾸지 마세요.',
-    '이모지/특수문자 남발 금지. 출력은 "수정된 리포트 텍스트만" 반환하세요.',
+    '이모지/특수문자 금지. 수정된 리포트 텍스트만 반환하세요.',
   ].join('\n');
 
-  const user = [
-    '원문:',
-    originalText,
-    '',
-    '편집 지시:',
-    instruction,
-  ].join('\n');
+  const user = `원문:\n${originalText}\n\n편집 지시:\n${instruction}`;
 
   const response = await client.responses.create({
-    model: 'gpt-4.1-nano',
+    model: 'gpt-5',
     input: [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
   });
 
-  const text =
-    response.output_text ||
+  return response.output_text ||
     response.output?.map((o) => o?.content?.map((c) => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') ||
     '';
-
-  return text;
 }
 
 app.post('/api/generate', async (req, res) => {
   try {
     if (!getApiKey()) {
-      return res.status(400).json({
-        error:
-          'OPENAI_API_KEY is not set. Set it via a local .env file or an environment variable (PowerShell example: $env:OPENAI_API_KEY="YOUR_KEY"; npm start). Then restart the server.',
-      });
+      return res.status(400).json({ error: 'OPENAI_API_KEY is not set. Create a .env file with OPENAI_API_KEY=your_key and restart.' });
     }
 
     const studentName = asNonEmptyString(req.body?.studentName);
     const bookTitle = asNonEmptyString(req.body?.bookTitle);
     const pagesOrChapter = asNonEmptyString(req.body?.pagesOrChapter);
-    const selectedPhrases = Array.isArray(req.body?.selectedPhrases) ? req.body.selectedPhrases : [];
-    const selectedWords = Array.isArray(req.body?.selectedWords) ? req.body.selectedWords : [];
+    const transcription = asNonEmptyString(req.body?.transcription);
     const tutorNotes = asNonEmptyString(req.body?.tutorNotes);
-    const tone = asNonEmptyString(req.body?.tone, '따뜻하고 긍정적');
-    const length = asNonEmptyString(req.body?.length, '짧게(4~6문장)');
+    const studentMemo = asNonEmptyString(req.body?.studentMemo);
+    const globalMemo = asNonEmptyString(req.body?.globalMemo);
+    const pastComments = Array.isArray(req.body?.pastComments) ? req.body.pastComments.filter(c => typeof c === 'string' && c.trim()).slice(0, 3) : [];
 
     if (!studentName) return res.status(400).json({ error: 'studentName is required' });
     if (!bookTitle) return res.status(400).json({ error: 'bookTitle is required' });
 
-    const text = await generateOne({
-      studentName,
-      bookTitle,
-      pagesOrChapter,
-      selectedPhrases,
-      selectedWords,
-      tutorNotes,
-      tone,
-      length,
-    });
-
-    if (!text.trim()) {
-      return res.status(502).json({ error: 'Empty response from model' });
-    }
+    const text = await generateOne({ studentName, bookTitle, pagesOrChapter, transcription, tutorNotes, studentMemo, globalMemo, pastComments });
+    if (!text.trim()) return res.status(502).json({ error: 'Empty response from model' });
 
     return res.json({ text });
   } catch (err) {
@@ -205,10 +171,7 @@ app.post('/api/generate', async (req, res) => {
 app.post('/api/edit', async (req, res) => {
   try {
     if (!getApiKey()) {
-      return res.status(400).json({
-        error:
-          'OPENAI_API_KEY is not set. Set it via a local .env file or an environment variable (PowerShell example: $env:OPENAI_API_KEY="YOUR_KEY"; npm start). Then restart the server.',
-      });
+      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
     }
 
     const originalText = asNonEmptyString(req.body?.text);
@@ -218,7 +181,7 @@ app.post('/api/edit', async (req, res) => {
     if (!instruction) return res.status(400).json({ error: 'instruction is required' });
 
     const text = await editOne({ originalText, instruction });
-    if (!text.trim()) return res.status(502).json({ error: 'Empty response from model' });
+    if (!text.trim()) return res.status(502).json({ error: 'Empty response' });
 
     return res.json({ text });
   } catch (err) {
@@ -227,99 +190,24 @@ app.post('/api/edit', async (req, res) => {
   }
 });
 
-app.get('/api/ping', (req, res) => {
-  return res.json({ ok: true });
-});
+app.get('/api/ping', (req, res) => res.json({ ok: true }));
 
-app.post('/api/generate-batch', async (req, res) => {
-  try {
-    if (!getApiKey()) {
-      return res.status(400).json({
-        error:
-          'OPENAI_API_KEY is not set. Set it via a local .env file or an environment variable (PowerShell example: $env:OPENAI_API_KEY="YOUR_KEY"; npm start). Then restart the server.',
-      });
-    }
-
-    const common = req.body?.common || {};
-    const sessions = Array.isArray(req.body?.sessions) ? req.body.sessions : [];
-    const tone = asNonEmptyString(common?.tone, '따뜻하고 긍정적');
-    const length = asNonEmptyString(common?.length, '짧게(4~6문장)');
-    const selectedPhrases = Array.isArray(common?.selectedPhrases) ? common.selectedPhrases : [];
-    const selectedWords = Array.isArray(common?.selectedWords) ? common.selectedWords : [];
-    const commonNotes = asNonEmptyString(common?.tutorNotes, '');
-
-    if (!sessions.length) return res.status(400).json({ error: 'sessions is required' });
-    if (sessions.length > 20) return res.status(400).json({ error: 'Too many sessions (max 20)' });
-
-    const limit = createLimiter(2);
-    const results = await Promise.all(
-      sessions.map((s, idx) =>
-        limit(async () => {
-          const studentName = asNonEmptyString(s?.studentName);
-          const bookTitle = asNonEmptyString(s?.bookTitle);
-          const pagesOrChapter = asNonEmptyString(s?.pagesOrChapter);
-          const perNotes = asNonEmptyString(s?.tutorNotes);
-          const perPhrases = Array.isArray(s?.selectedPhrases) ? s.selectedPhrases : null;
-          const perWords = Array.isArray(s?.selectedWords) ? s.selectedWords : null;
-
-          if (!studentName) return { idx, ok: false, error: 'studentName is required' };
-          if (!bookTitle) return { idx, ok: false, error: 'bookTitle is required' };
-
-          const mergedNotes =
-            commonNotes && perNotes
-              ? `공통 메모: ${commonNotes}\n개인 메모: ${perNotes}`
-              : commonNotes || perNotes || '';
-
-          try {
-            const text = await generateOne({
-              studentName,
-              bookTitle,
-              pagesOrChapter,
-              selectedPhrases: perPhrases ?? selectedPhrases,
-              selectedWords: perWords ?? selectedWords,
-              tutorNotes: mergedNotes,
-              tone,
-              length,
-            });
-            if (!text.trim()) return { idx, ok: false, error: 'Empty response from model' };
-            return { idx, ok: true, text };
-          } catch (e) {
-            const message = e instanceof Error ? e.message : 'Unknown error';
-            return { idx, ok: false, error: message };
-          }
-        }),
-      ),
-    );
-
-    return res.json({ results });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: message });
-  }
-});
-
-// Only start a real HTTP server locally. On Vercel, this file is loaded as a serverless function.
+// Only start server locally (not on Vercel)
 if (!process.env.VERCEL) {
   const server = app.listen(port, () => {
     const present = !!getApiKey();
-    console.log(`AI report app running: http://localhost:${port}`);
-    console.log(`[env] cwd=${process.cwd()}`);
-    console.log(`[env] OPENAI_API_KEY ${present ? 'detected' : 'missing'}`);
+    console.log(`수업 리포트 앱 실행: http://localhost:${port}`);
+    console.log(`OPENAI_API_KEY ${present ? '감지됨' : '없음'}`);
   });
 
   server.on('error', (err) => {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'EADDRINUSE') {
-      console.error(`[ERROR] Port ${port} is already in use.`);
-      console.error(
-        '[FIX] Stop the other process using this port, or start with a different port (PowerShell: $env:PORT="3001"; npm start).',
-      );
+      console.error(`포트 ${port}가 이미 사용 중입니다.`);
       process.exit(1);
     }
-    console.error('[ERROR] Server failed to start:', err);
+    console.error('서버 시작 실패:', err);
     process.exit(1);
   });
 }
 
 export default app;
-
-
