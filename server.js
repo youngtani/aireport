@@ -1,64 +1,210 @@
 import express from 'express';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
-import { Readable } from 'stream';
+import multer from 'multer';
+import { initializeApp, cert } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 
 dotenv.config();
 
+/* ── Firebase init ── */
+let db = null;
+try {
+  const fbConfig = process.env.FIREBASE_SERVICE_ACCOUNT
+    ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+    : null;
+  if (fbConfig) {
+    initializeApp({ credential: cert(fbConfig) });
+    db = getFirestore();
+    console.log('[Firebase] Connected');
+  } else {
+    console.warn('[Firebase] FIREBASE_SERVICE_ACCOUNT not set — using in-memory fallback');
+  }
+} catch (e) {
+  console.error('[Firebase] Init error:', e.message);
+}
+
+/* ── Express setup ── */
 export const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static('public'));
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+/* ── Tutors (from .env) ── */
+// Format: TUTORS=name1:pass1,name2:pass2
+function getTutors() {
+  dotenv.config();
+  const raw = process.env.TUTORS || '';
+  const map = {};
+  for (const pair of raw.split(',')) {
+    const [name, pass] = pair.split(':').map(s => s.trim());
+    if (name && pass) map[name] = pass;
+  }
+  return map;
+}
+
+/* ── Simple session tokens (in-memory) ── */
+const sessions = new Map(); // token -> { tutor, expires }
+function generateToken() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, '0')).join('');
+}
+function authMiddleware(req, res, next) {
+  const token = req.headers['x-auth-token'];
+  const session = sessions.get(token);
+  if (!session || session.expires < Date.now()) {
+    sessions.delete(token);
+    return res.status(401).json({ error: 'Unauthorized — please log in' });
+  }
+  req.tutorName = session.tutor;
+  next();
+}
+
+/* ── Auth endpoints ── */
+app.post('/api/login', (req, res) => {
+  const { name, password } = req.body || {};
+  const tutors = getTutors();
+  if (!name || !password) return res.status(400).json({ error: 'Name and password required' });
+  if (tutors[name] !== password) return res.status(401).json({ error: 'Invalid credentials' });
+  const token = generateToken();
+  sessions.set(token, { tutor: name, expires: Date.now() + 24 * 60 * 60 * 1000 }); // 24h
+  return res.json({ token, tutor: name });
+});
+
+app.get('/api/me', authMiddleware, (req, res) => {
+  return res.json({ tutor: req.tutorName });
+});
+
+/* ── Helper ── */
 function getApiKey() {
   dotenv.config();
   const key = process.env.OPENAI_API_KEY;
   return typeof key === 'string' ? key.trim() : '';
 }
-
 function createClient() {
   return new OpenAI({ apiKey: getApiKey() || 'missing' });
 }
-
 function asNonEmptyString(value, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-// --- Transcription endpoint ---
-// We use express raw body parsing for multipart audio
-import multer from 'multer';
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+/* ── Firestore helpers ── */
+// Collections: students, studentMemos, comments (finalized), studentComments (drafts per-student)
 
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  try {
-    if (!getApiKey()) {
-      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file provided' });
-    }
+async function fbGetStudents() {
+  if (!db) return [];
+  const snap = await db.collection('students').orderBy('name').get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+async function fbAddStudent(name) {
+  if (!db) return null;
+  const existing = await db.collection('students').where('name', '==', name).get();
+  if (!existing.empty) return existing.docs[0].id;
+  const ref = await db.collection('students').add({ name, createdAt: new Date().toISOString() });
+  return ref.id;
+}
+async function fbDeleteStudent(id) {
+  if (!db) return;
+  await db.collection('students').doc(id).delete();
+}
 
-    const client = createClient();
-    // Convert buffer to a File-like object for OpenAI
-    const file = new File([req.file.buffer], req.file.originalname || 'audio.webm', {
-      type: req.file.mimetype || 'audio/webm',
-    });
-
-    const transcription = await client.audio.transcriptions.create({
-      model: 'whisper-1',
-      file: file,
-      language: 'ko',
-    });
-
-    return res.json({ text: transcription.text || '' });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Transcription error';
-    return res.status(500).json({ error: message });
+async function fbGetStudentMemo(studentName) {
+  if (!db) return '';
+  const snap = await db.collection('studentMemos').where('studentName', '==', studentName).limit(1).get();
+  return snap.empty ? '' : snap.docs[0].data().memo || '';
+}
+async function fbSetStudentMemo(studentName, memo) {
+  if (!db) return;
+  const snap = await db.collection('studentMemos').where('studentName', '==', studentName).limit(1).get();
+  if (snap.empty) {
+    await db.collection('studentMemos').add({ studentName, memo, updatedAt: new Date().toISOString() });
+  } else {
+    await snap.docs[0].ref.update({ memo, updatedAt: new Date().toISOString() });
   }
+}
+
+async function fbGetFinalComments(studentName, limit = 10) {
+  if (!db) return [];
+  let q = db.collection('comments').orderBy('createdAt', 'desc').limit(limit);
+  if (studentName) q = db.collection('comments').where('studentName', '==', studentName).orderBy('createdAt', 'desc').limit(limit);
+  const snap = await q.get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+async function fbSaveFinalComment(data) {
+  if (!db) return null;
+  const ref = await db.collection('comments').add({ ...data, createdAt: new Date().toISOString() });
+  return ref.id;
+}
+
+/* ── Shared data API endpoints ── */
+
+// Students (shared)
+app.get('/api/students', authMiddleware, async (req, res) => {
+  try {
+    const students = await fbGetStudents();
+    return res.json({ students });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.post('/api/students', authMiddleware, async (req, res) => {
+  try {
+    const name = asNonEmptyString(req.body?.name);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const id = await fbAddStudent(name);
+    return res.json({ id, name });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/students/:id', authMiddleware, async (req, res) => {
+  try {
+    await fbDeleteStudent(req.params.id);
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
-// --- Generate comment ---
+// Student memos (shared per-student)
+app.get('/api/student-memo/:name', authMiddleware, async (req, res) => {
+  try {
+    const memo = await fbGetStudentMemo(req.params.name);
+    return res.json({ memo });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.post('/api/student-memo/:name', authMiddleware, async (req, res) => {
+  try {
+    await fbSetStudentMemo(req.params.name, asNonEmptyString(req.body?.memo));
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
+// Finalized comments (shared)
+app.get('/api/comments', authMiddleware, async (req, res) => {
+  try {
+    const studentName = req.query.student || '';
+    const comments = await fbGetFinalComments(studentName, 20);
+    return res.json({ comments });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.post('/api/comments', authMiddleware, async (req, res) => {
+  try {
+    const { studentName, bookTitle, text, tutorName } = req.body || {};
+    if (!studentName || !bookTitle || !text) return res.status(400).json({ error: 'Missing fields' });
+    const id = await fbSaveFinalComment({ studentName, bookTitle, text, tutorName: tutorName || req.tutorName });
+    return res.json({ id });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
+/* ── Transcription ── */
+app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, res) => {
+  try {
+    if (!getApiKey()) return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
+    if (!req.file) return res.status(400).json({ error: 'No audio file' });
+    const client = createClient();
+    const file = new File([req.file.buffer], req.file.originalname || 'audio.webm', { type: req.file.mimetype || 'audio/webm' });
+    const transcription = await client.audio.transcriptions.create({ model: 'whisper-1', file });
+    return res.json({ text: transcription.text || '' });
+  } catch (err) { return res.status(500).json({ error: err.message || 'Transcription error' }); }
+});
+
+/* ── Generate comment ── */
 const SYSTEM_PROMPT = `당신은 독서학원 선생님이 학부모에게 보내는 수업 코멘트를 작성하는 전문 작가입니다.
 
 아래 규칙을 반드시 따르세요:
@@ -86,7 +232,6 @@ const SYSTEM_PROMPT = `당신은 독서학원 선생님이 학부모에게 보�
 
 async function generateOne({ studentName, bookTitle, pagesOrChapter, transcription, tutorNotes, studentMemo, globalMemo, pastComments }) {
   const client = createClient();
-
   const userParts = [
     `학생 이름: ${studentName}`,
     `오늘 읽은 책: ${bookTitle}`,
@@ -96,7 +241,7 @@ async function generateOne({ studentName, bookTitle, pagesOrChapter, transcripti
     transcription ? `수업 대화 내용:\n${transcription}` : null,
     tutorNotes ? `추가 메모: ${tutorNotes}` : null,
     pastComments && pastComments.length
-      ? `[이 학생의 과거 코멘트 (참고용 - 톤과 스타일을 유지하되 내용은 오늘 수업 기준으로 작성)]\n${pastComments.join('\n---\n')}`
+      ? `[이 학생의 과거 코멘트 (참고용)]\n${pastComments.join('\n---\n')}`
       : null,
   ].filter(Boolean).join('\n\n');
 
@@ -107,106 +252,70 @@ async function generateOne({ studentName, bookTitle, pagesOrChapter, transcripti
       { role: 'user', content: userParts },
     ],
   });
-
-  const text =
-    response.output_text ||
-    response.output?.map((o) => o?.content?.map((c) => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') ||
-    '';
-
-  return text;
+  return response.output_text ||
+    response.output?.map(o => o?.content?.map(c => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') || '';
 }
 
 async function editOne({ originalText, instruction }) {
   const client = createClient();
-  const system = [
-    '당신은 한국어 수업 리포트를 편집하는 도우미입니다.',
-    '원문을 기반으로 사용자의 편집 지시사항을 반영해 자연스럽게 다듬어 주세요.',
-    '의미/정보를 임의로 크게 바꾸지 마세요.',
-    '이모지/특수문자 금지. 수정된 리포트 텍스트만 반환하세요.',
-  ].join('\n');
-
-  const user = `원문:\n${originalText}\n\n편집 지시:\n${instruction}`;
-
+  const system = '당신은 한국어 수업 리포트를 편집하는 도우미입니다.\n원문을 기반으로 사용자의 편집 지시사항을 반영해 자연스럽게 다듬어 주세요.\n이모지/특수문자 금지. 수정된 리포트 텍스트만 반환.';
   const response = await client.responses.create({
     model: 'gpt-5',
     input: [
       { role: 'system', content: system },
-      { role: 'user', content: user },
+      { role: 'user', content: `원문:\n${originalText}\n\n편집 지시:\n${instruction}` },
     ],
   });
-
   return response.output_text ||
-    response.output?.map((o) => o?.content?.map((c) => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') ||
-    '';
+    response.output?.map(o => o?.content?.map(c => c?.text).filter(Boolean).join('')).filter(Boolean).join('\n') || '';
 }
 
-app.post('/api/generate', async (req, res) => {
+app.post('/api/generate', authMiddleware, async (req, res) => {
   try {
-    if (!getApiKey()) {
-      return res.status(400).json({ error: 'OPENAI_API_KEY is not set. Create a .env file with OPENAI_API_KEY=your_key and restart.' });
-    }
-
+    if (!getApiKey()) return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
     const studentName = asNonEmptyString(req.body?.studentName);
     const bookTitle = asNonEmptyString(req.body?.bookTitle);
-    const pagesOrChapter = asNonEmptyString(req.body?.pagesOrChapter);
-    const transcription = asNonEmptyString(req.body?.transcription);
-    const tutorNotes = asNonEmptyString(req.body?.tutorNotes);
-    const studentMemo = asNonEmptyString(req.body?.studentMemo);
-    const globalMemo = asNonEmptyString(req.body?.globalMemo);
-    const pastComments = Array.isArray(req.body?.pastComments) ? req.body.pastComments.filter(c => typeof c === 'string' && c.trim()).slice(0, 3) : [];
-
-    if (!studentName) return res.status(400).json({ error: 'studentName is required' });
-    if (!bookTitle) return res.status(400).json({ error: 'bookTitle is required' });
-
-    const text = await generateOne({ studentName, bookTitle, pagesOrChapter, transcription, tutorNotes, studentMemo, globalMemo, pastComments });
-    if (!text.trim()) return res.status(502).json({ error: 'Empty response from model' });
-
+    if (!studentName) return res.status(400).json({ error: 'studentName required' });
+    if (!bookTitle) return res.status(400).json({ error: 'bookTitle required' });
+    const text = await generateOne({
+      studentName, bookTitle,
+      pagesOrChapter: asNonEmptyString(req.body?.pagesOrChapter),
+      transcription: asNonEmptyString(req.body?.transcription),
+      tutorNotes: asNonEmptyString(req.body?.tutorNotes),
+      studentMemo: asNonEmptyString(req.body?.studentMemo),
+      globalMemo: asNonEmptyString(req.body?.globalMemo),
+      pastComments: Array.isArray(req.body?.pastComments) ? req.body.pastComments.filter(c => typeof c === 'string' && c.trim()).slice(0, 3) : [],
+    });
+    if (!text.trim()) return res.status(502).json({ error: 'Empty response' });
     return res.json({ text });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: message });
-  }
+  } catch (err) { return res.status(500).json({ error: err.message || 'Unknown error' }); }
 });
 
-app.post('/api/edit', async (req, res) => {
+app.post('/api/edit', authMiddleware, async (req, res) => {
   try {
-    if (!getApiKey()) {
-      return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
-    }
-
+    if (!getApiKey()) return res.status(400).json({ error: 'OPENAI_API_KEY not set' });
     const originalText = asNonEmptyString(req.body?.text);
     const instruction = asNonEmptyString(req.body?.instruction);
-
-    if (!originalText) return res.status(400).json({ error: 'text is required' });
-    if (!instruction) return res.status(400).json({ error: 'instruction is required' });
-
+    if (!originalText || !instruction) return res.status(400).json({ error: 'text and instruction required' });
     const text = await editOne({ originalText, instruction });
     if (!text.trim()) return res.status(502).json({ error: 'Empty response' });
-
     return res.json({ text });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: message });
-  }
+  } catch (err) { return res.status(500).json({ error: err.message || 'Unknown error' }); }
 });
 
 app.get('/api/ping', (req, res) => res.json({ ok: true }));
 
-// Only start server locally (not on Vercel)
+/* ── Start server ── */
 if (!process.env.VERCEL) {
   const server = app.listen(port, () => {
-    const present = !!getApiKey();
-    console.log(`수업 리포트 앱 실행: http://localhost:${port}`);
-    console.log(`OPENAI_API_KEY ${present ? '감지됨' : '없음'}`);
+    console.log(`수업 리포트 앱: http://localhost:${port}`);
+    console.log(`OPENAI_API_KEY: ${getApiKey() ? 'OK' : 'MISSING'}`);
+    console.log(`Firebase: ${db ? 'OK' : 'MISSING'}`);
+    console.log(`Tutors: ${Object.keys(getTutors()).join(', ') || 'NONE'}`);
   });
-
-  server.on('error', (err) => {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'EADDRINUSE') {
-      console.error(`포트 ${port}가 이미 사용 중입니다.`);
-      process.exit(1);
-    }
-    console.error('서버 시작 실패:', err);
-    process.exit(1);
+  server.on('error', err => {
+    if (err?.code === 'EADDRINUSE') { console.error(`Port ${port} in use`); process.exit(1); }
+    console.error('Server error:', err); process.exit(1);
   });
 }
 
