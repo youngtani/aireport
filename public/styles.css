@@ -629,6 +629,43 @@ body {
   font-weight: 700;
   letter-spacing: -0.02em;
 }
+/* ========== Login tabs ========== */
+.login-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.login-tab {
+  flex: 1;
+  padding: 9px 0;
+  border: none;
+  background: var(--border-light);
+  color: var(--text-tertiary);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.login-tab:hover {
+  color: var(--text-secondary);
+  background: #eef0f3;
+}
+.login-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+.login-form-section {
+  animation: fadeIn 200ms ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .login-field {
   margin-bottom: 14px;
 }

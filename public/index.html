@@ -20,16 +20,45 @@
           </div>
           <div class="login-title">수업 리포트</div>
         </div>
-        <div class="login-field">
-          <label class="memo-label">이름</label>
-          <input id="loginName" class="input" type="text" placeholder="선생님 이름" autocomplete="username" />
+
+        <!-- Tabs -->
+        <div class="login-tabs">
+          <button class="login-tab active" data-tab="login" type="button">로그인</button>
+          <button class="login-tab" data-tab="register" type="button">회원가입</button>
         </div>
-        <div class="login-field">
-          <label class="memo-label">비밀번호</label>
-          <input id="loginPass" class="input" type="password" placeholder="비밀번호" autocomplete="current-password" />
+
+        <!-- Login form -->
+        <div id="loginForm" class="login-form-section">
+          <div class="login-field">
+            <label class="memo-label">이름</label>
+            <input id="loginName" class="input" type="text" placeholder="선생님 이름" autocomplete="username" />
+          </div>
+          <div class="login-field">
+            <label class="memo-label">비밀번호</label>
+            <input id="loginPass" class="input" type="password" placeholder="비밀번호" autocomplete="current-password" />
+          </div>
+          <button id="btnLogin" class="generate-btn" type="button">로그인</button>
+          <div id="loginError" class="status bad" style="margin-top:8px"></div>
         </div>
-        <button id="btnLogin" class="generate-btn" type="button">로그인</button>
-        <div id="loginError" class="status bad" style="margin-top:8px"></div>
+
+        <!-- Register form -->
+        <div id="registerForm" class="login-form-section" hidden>
+          <div class="login-field">
+            <label class="memo-label">이름</label>
+            <input id="regName" class="input" type="text" placeholder="선생님 이름" autocomplete="off" />
+          </div>
+          <div class="login-field">
+            <label class="memo-label">비밀번호</label>
+            <input id="regPass" class="input" type="password" placeholder="비밀번호" autocomplete="new-password" />
+          </div>
+          <div class="login-field">
+            <label class="memo-label">비밀번호 확인</label>
+            <input id="regPassConfirm" class="input" type="password" placeholder="비밀번호 다시 입력" autocomplete="new-password" />
+          </div>
+          <button id="btnRegister" class="generate-btn" type="button">가입 신청</button>
+          <div id="regError" class="status bad" style="margin-top:8px"></div>
+          <div id="regSuccess" class="status good" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
 

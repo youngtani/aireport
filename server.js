@@ -32,17 +32,28 @@ app.use(express.static('public'));
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-/* ── Tutors (from .env) ── */
-// Format: TUTORS=name1:pass1,name2:pass2
-function getTutors() {
-  dotenv.config();
-  const raw = process.env.TUTORS || '';
-  const map = {};
-  for (const pair of raw.split(',')) {
-    const [name, pass] = pair.split(':').map(s => s.trim());
-    if (name && pass) map[name] = pass;
-  }
-  return map;
+/* ── Tutors (Firebase-managed) ── */
+// Tutors are stored in Firestore 'tutors' collection
+// Each doc: { name, password, approved: true/false, createdAt }
+// Only approved tutors can log in. Admin sets approved=true in Firebase console.
+
+async function fbGetTutor(name) {
+  if (!db) return null;
+  const snap = await db.collection('tutors').where('name', '==', name).limit(1).get();
+  return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+}
+
+async function fbRegisterTutor(name, password) {
+  if (!db) throw new Error('Firebase not connected');
+  const existing = await db.collection('tutors').where('name', '==', name).get();
+  if (!existing.empty) throw new Error('이미 등록된 이름입니다.');
+  const ref = await db.collection('tutors').add({
+    name,
+    password,
+    approved: false,
+    createdAt: new Date().toISOString(),
+  });
+  return ref.id;
 }
 
 /* ── Simple session tokens (in-memory) ── */
@@ -62,14 +73,27 @@ function authMiddleware(req, res, next) {
 }
 
 /* ── Auth endpoints ── */
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { name, password } = req.body || {};
-  const tutors = getTutors();
-  if (!name || !password) return res.status(400).json({ error: 'Name and password required' });
-  if (tutors[name] !== password) return res.status(401).json({ error: 'Invalid credentials' });
-  const token = generateToken();
-  sessions.set(token, { tutor: name, expires: Date.now() + 24 * 60 * 60 * 1000 }); // 24h
-  return res.json({ token, tutor: name });
+  if (!name || !password) return res.status(400).json({ error: '이름과 비밀번호를 입력하세요.' });
+  try {
+    const tutor = await fbGetTutor(name);
+    if (!tutor || tutor.password !== password) return res.status(401).json({ error: '이름 또는 비밀번호가 틀렸습니다.' });
+    if (!tutor.approved) return res.status(403).json({ error: '승인 대기 중입니다. 관리자에게 문의하세요.' });
+    const token = generateToken();
+    sessions.set(token, { tutor: name, expires: Date.now() + 24 * 60 * 60 * 1000 }); // 24h
+    return res.json({ token, tutor: name });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/register', async (req, res) => {
+  const { name, password } = req.body || {};
+  if (!name || !password) return res.status(400).json({ error: '이름과 비밀번호를 입력하세요.' });
+  if (name.length < 1 || password.length < 2) return res.status(400).json({ error: '비밀번호는 2자 이상이어야 합니다.' });
+  try {
+    const id = await fbRegisterTutor(name, password);
+    return res.json({ id, message: '가입 완료! 관리자 승인 후 로그인할 수 있습니다.' });
+  } catch (e) { return res.status(400).json({ error: e.message }); }
 });
 
 app.get('/api/me', authMiddleware, (req, res) => {
@@ -311,7 +335,7 @@ if (!process.env.VERCEL) {
     console.log(`수업 리포트 앱: http://localhost:${port}`);
     console.log(`OPENAI_API_KEY: ${getApiKey() ? 'OK' : 'MISSING'}`);
     console.log(`Firebase: ${db ? 'OK' : 'MISSING'}`);
-    console.log(`Tutors: ${Object.keys(getTutors()).join(', ') || 'NONE'}`);
+    console.log(`Tutors: Firebase-managed`);
   });
   server.on('error', err => {
     if (err?.code === 'EADDRINUSE') { console.error(`Port ${port} in use`); process.exit(1); }

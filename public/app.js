@@ -447,6 +447,21 @@ async function boot() {
    INIT
    ════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', async () => {
+  // Tab switching
+  document.querySelectorAll('.login-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const isLogin = tab.dataset.tab === 'login';
+      $('loginForm').hidden = !isLogin;
+      $('registerForm').hidden = isLogin;
+      // Clear messages
+      $('loginError').textContent = '';
+      $('regError').textContent = '';
+      $('regSuccess').textContent = '';
+    });
+  });
+
   // Login form
   const doLogin = async () => {
     const name = $('loginName').value.trim();
@@ -463,6 +478,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('btnLogin').addEventListener('click', doLogin);
   $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
   $('loginName').addEventListener('keydown', e => { if (e.key === 'Enter') $('loginPass').focus(); });
+
+  // Register form
+  const doRegister = async () => {
+    const name = $('regName').value.trim();
+    const pass = $('regPass').value.trim();
+    const passConfirm = $('regPassConfirm').value.trim();
+    $('regError').textContent = '';
+    $('regSuccess').textContent = '';
+    if (!name || !pass) { $('regError').textContent = '이름과 비밀번호를 입력하세요.'; return; }
+    if (pass !== passConfirm) { $('regError').textContent = '비밀번호가 일치하지 않습니다.'; return; }
+    try {
+      const res = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, password: pass }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || '가입 실패');
+      $('regSuccess').textContent = data.message || '가입 완료! 관리자 승인 후 로그인할 수 있습니다.';
+      $('regName').value = '';
+      $('regPass').value = '';
+      $('regPassConfirm').value = '';
+    } catch (e) {
+      $('regError').textContent = e?.message || '가입 실패';
+    }
+  };
+  $('btnRegister').addEventListener('click', doRegister);
+  $('regPassConfirm').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+  $('regName').addEventListener('keydown', e => { if (e.key === 'Enter') $('regPass').focus(); });
+  $('regPass').addEventListener('keydown', e => { if (e.key === 'Enter') $('regPassConfirm').focus(); });
 
   // Auto-login if token exists
   if (authToken && await checkAuth()) {
