@@ -251,7 +251,11 @@ app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, 
     if (!req.file) return res.status(400).json({ error: 'No audio file' });
     const client = createClient();
     const file = new File([req.file.buffer], req.file.originalname || 'audio.webm', { type: req.file.mimetype || 'audio/webm' });
-    const transcription = await client.audio.transcriptions.create({ model: 'whisper-1', file });
+    const transcription = await client.audio.transcriptions.create({
+      model: 'whisper-1',
+      file,
+      prompt: '이 수업에서는 한국어와 English를 함께 사용합니다. 영어 단어와 문장은 영어 그대로 transcribe 해주세요.',
+    });
     return res.json({ text: transcription.text || '' });
   } catch (err) { return res.status(500).json({ error: err.message || 'Transcription error' }); }
 });
