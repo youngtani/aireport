@@ -255,60 +255,186 @@ body {
   opacity: 1;
 }
 
-/* ========== Recording ========== */
-.record-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.record-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 18px;
-  border: none;
-  border-radius: 999px;
-  background: var(--danger-subtle);
-  color: var(--danger);
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-.record-btn:hover {
-  background: #fee2e2;
-}
-.record-btn.recording {
-  background: var(--danger);
-  color: #fff;
-}
-.record-btn.recording .record-dot {
+/* ========== Voice Card (Soniox-inspired) ========== */
+.voice-card {
   background: #fff;
-  animation: blink 1s infinite;
+  border-radius: 20px;
+  box-shadow: 0 2px 20px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04);
+  overflow: hidden;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.3s ease;
 }
-.record-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger);
-  flex-shrink: 0;
+.voice-card:has(.voice-mic-btn.recording) {
+  box-shadow: 0 0 0 2px #3b82f6, 0 4px 24px rgba(59,130,246,0.15);
+}
+
+/* Transcript display area */
+.voice-transcript-area {
+  padding: 24px 28px 16px;
+  min-height: 160px;
+  position: relative;
+}
+.voice-transcript-text {
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  min-height: 120px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.voice-placeholder {
+  color: #9ca3af;
+  font-size: 15px;
+}
+.voice-textarea-hidden {
+  position: absolute;
+  top: 24px;
+  left: 28px;
+  right: 28px;
+  bottom: 16px;
+  width: calc(100% - 56px);
+  height: calc(100% - 40px);
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  resize: none;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+.voice-textarea-hidden.editing {
+  opacity: 1;
+  pointer-events: auto;
+  background: #fff;
+  z-index: 2;
+}
+
+/* Final text spans */
+.voice-final {
+  color: var(--text-primary);
+}
+.voice-pending {
+  color: #94a3b8;
+  font-style: italic;
+}
+.voice-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: #3b82f6;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: cursorBlink 1s step-end infinite;
+}
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
-.record-timer {
+
+/* Toolbar */
+.voice-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-top: 1px solid #f1f5f9;
+  background: #fafbfc;
+}
+.voice-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.voice-lang-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6366f1;
+  font-family: var(--font);
+}
+.voice-lang-badge svg {
+  stroke: #6366f1;
+}
+.voice-timer {
   font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
-  min-width: 48px;
+  min-width: 42px;
 }
-.record-status-text {
+.voice-status {
   font-size: 12px;
   color: var(--text-tertiary);
+}
+.voice-live {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #fff;
+  background: #10b981;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+  animation: blink 1.5s infinite;
+}
+.voice-live[hidden] { display: none; }
+
+/* Mic button */
+.voice-mic-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  box-shadow: 0 2px 8px rgba(59,130,246,0.25);
+}
+.voice-mic-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(59,130,246,0.35);
+}
+.voice-mic-btn:active {
+  transform: translateY(0);
+}
+.voice-mic-btn.recording {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  box-shadow: 0 2px 8px rgba(239,68,68,0.3);
+  animation: pulseRecord 2s ease-in-out infinite;
+}
+.voice-mic-btn.recording:hover {
+  box-shadow: 0 4px 16px rgba(239,68,68,0.4);
+}
+.voice-mic-btn.recording .voice-mic-icon {
+  animation: blink 1s infinite;
+}
+@keyframes pulseRecord {
+  0%, 100% { box-shadow: 0 2px 8px rgba(239,68,68,0.3); }
+  50% { box-shadow: 0 2px 20px rgba(239,68,68,0.5); }
 }
 
 /* ========== Memos ========== */

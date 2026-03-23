@@ -244,7 +244,58 @@ app.post('/api/comments', authMiddleware, async (req, res) => {
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
-/* ── Transcription ── */
+/* ── Soniox temporary API key for browser real-time transcription ── */
+function getSonioxKey() {
+  dotenv.config();
+  const key = process.env.SONIOX_API_KEY;
+  return typeof key === 'string' ? key.trim() : '';
+}
+
+app.get('/api/soniox-token', authMiddleware, async (req, res) => {
+  try {
+    const sonioxKey = getSonioxKey();
+    if (!sonioxKey) return res.status(400).json({ error: 'SONIOX_API_KEY is not set.' });
+
+    // Try to get a temporary API key first (preferred for security)
+    try {
+      const response = await fetch('https://api.soniox.com/v1/auth/temporary-api-key', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${sonioxKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          usage_type: 'transcribe_websocket',
+          expires_in_seconds: 600,
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.api_key) {
+          console.log('[Soniox] Temporary key generated successfully');
+          return res.json({ apiKey: data.api_key });
+        }
+      }
+      const errBody = await response.text().catch(() => '');
+      console.warn('[Soniox] Temporary key endpoint returned', response.status, errBody);
+    } catch (tempErr) {
+      console.warn('[Soniox] Temporary key fetch failed:', tempErr.message);
+    }
+
+    // Fallback: return the API key directly (still works with Soniox SDK)
+    console.log('[Soniox] Using direct API key as fallback');
+    return res.json({ apiKey: sonioxKey });
+  } catch (err) {
+    console.error('[Soniox] Token error:', err.message);
+    return res.status(500).json({ error: err.message || 'Failed to get Soniox token' });
+  }
+});
+
+/* ── Transcription (batch fallback via OpenAI) ── */
+const TRANSCRIPTION_PROMPT = `This is a Korean tutoring session (독서학원 수업). The teacher and student freely mix Korean (한국어) and English in the SAME sentence.
+Examples of what they say: "오늘 읽은 book은 Charlotte's Web이야", "character가 누구야?", "setting은 어디야?", "vocabulary 단어 중에 abandon이 뭐야?"
+CRITICAL: Transcribe EXACTLY as spoken — keep Korean parts in Korean (한글) and English parts in English. Do NOT translate. Do NOT convert one language to the other. Mixed sentences are normal and expected.`;
+
 app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, res) => {
   try {
     if (!getApiKey()) return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
@@ -254,6 +305,7 @@ app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, 
     const transcription = await client.audio.transcriptions.create({
       model: 'gpt-4o-transcribe',
       file,
+      prompt: TRANSCRIPTION_PROMPT,
     });
     return res.json({ text: transcription.text || '' });
   } catch (err) { return res.status(500).json({ error: err.message || 'Transcription error' }); }
@@ -367,6 +419,9 @@ if (!process.env.VERCEL) {
     console.log(`OPENAI_API_KEY: ${getApiKey() ? 'OK' : 'MISSING'}`);
     console.log(`Firebase: ${db ? 'OK' : 'MISSING'}`);
     console.log(`Tutors: Firebase-managed`);
+    console.log(`Soniox: ${getSonioxKey() ? 'OK' : 'MISSING (will use OpenAI fallback)'}`);
+    console.log(`Transcription: ${getSonioxKey() ? 'Soniox real-time' : 'OpenAI chunked'}`);
+
   });
   server.on('error', err => {
     if (err?.code === 'EADDRINUSE') { console.error(`Port ${port} in use`); process.exit(1); }

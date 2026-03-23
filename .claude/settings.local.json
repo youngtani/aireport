@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(curl -s http://localhost:3000/api/ping)",
+      "Bash(start:*)",
+      "WebSearch",
+      "WebFetch(domain:developers.openai.com)",
+      "WebFetch(domain:community.openai.com)",
+      "WebFetch(domain:platform.openai.com)"
+    ]
+  }
+}

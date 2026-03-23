@@ -208,43 +208,304 @@ async function loadStudentContext(name) {
 }
 
 /* ════════════════════════════════════
-   RECORDING
+   RECORDING — Soniox real-time (primary) + OpenAI batch (fallback)
+   ════════════════════════════════════
+   Soniox: true word-by-word streaming with Korean+English code-switching.
+   If SONIOX_API_KEY is not set, falls back to chunked OpenAI transcription.
    ════════════════════════════════════ */
-let recorder = null, chunks = [], recording = false, timerInterval = null, recordStart = 0;
-function fmtTime(ms) { const s = Math.floor(ms/1000); return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`; }
+
+let recording = false, timerInterval = null, recordStart = 0;
+let sonioxClient = null; // Soniox SDK instance
+let sonioxFinalText = ''; // accumulated final (confirmed) token text
+let sonioxNonFinalText = ''; // current non-final (provisional) token text
+let preRecordText = ''; // text in textarea before recording started
+
+// Pre-loaded Soniox state for instant startup
+let cachedSonioxToken = null;
+let sonioxTokenExpiry = 0;
+
+// Fallback state (when Soniox unavailable)
+let mediaStream = null, recorder = null;
+let allChunks = [], lastTranscribedText = '';
+let transcribeTimer = null, processingTranscribe = false;
+const CHUNK_INTERVAL_MS = 4000;
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/* ── Render transcript into both display div and hidden textarea ── */
+function renderSonioxTranscript() {
+  const display = $('transcriptDisplay');
+  const ta = $('transcription');
+
+  const combined = (sonioxFinalText + sonioxNonFinalText).trim();
+
+  // Update hidden textarea (used for report generation)
+  ta.value = preRecordText ? preRecordText + '\n' + combined : combined;
+
+  // Update visual display
+  const prefix = preRecordText ? esc(preRecordText) + '<br>' : '';
+  const finalHtml = sonioxFinalText ? `<span class="voice-final">${esc(sonioxFinalText)}</span>` : '';
+  const pendingHtml = sonioxNonFinalText ? `<span class="voice-pending">${esc(sonioxNonFinalText)}</span>` : '';
+  const cursor = recording ? '<span class="voice-cursor"></span>' : '';
+  display.innerHTML = prefix + finalHtml + pendingHtml + cursor || '<span class="voice-placeholder">말하기 시작하세요. 한국어와 영어를 자유롭게 섞어도 됩니다.</span>';
+  display.scrollTop = display.scrollHeight;
+}
+
+/* ── Sync display from textarea (for fallback mode) ── */
+function syncDisplayFromTextarea() {
+  const display = $('transcriptDisplay');
+  const ta = $('transcription');
+  const text = ta.value.trim();
+  if (text) {
+    const cursor = recording ? '<span class="voice-cursor"></span>' : '';
+    display.innerHTML = `<span class="voice-final">${esc(text)}</span>${cursor}`;
+  } else {
+    display.innerHTML = '<span class="voice-placeholder">말하기 시작하세요. 한국어와 영어를 자유롭게 섞어도 됩니다.</span>';
+  }
+  display.scrollTop = display.scrollHeight;
+}
+
+/* ── Pre-load Soniox SDK and token for instant startup ── */
+async function preloadSoniox() {
+  try {
+    // Load SDK module in background
+    if (!window.SonioxClient) {
+      const module = await import('https://unpkg.com/@soniox/speech-to-text-web?module');
+      window.SonioxClient = module.SonioxClient;
+      console.log('[Soniox] SDK pre-loaded');
+    }
+    // Pre-fetch API token (valid for 10 min)
+    if (!cachedSonioxToken || Date.now() > sonioxTokenExpiry) {
+      const data = await api('GET', '/api/soniox-token');
+      cachedSonioxToken = data.apiKey;
+      sonioxTokenExpiry = Date.now() + 8 * 60 * 1000; // refresh 2 min early
+      console.log('[Soniox] Token pre-fetched');
+    }
+    useSoniox = true;
+  } catch (err) {
+    console.warn('[Soniox] Pre-load failed:', err.message);
+    useSoniox = false;
+  }
+}
+
+/* ── Soniox: start real-time transcription ── */
+/*
+   Matches the official Soniox example pattern exactly:
+   https://github.com/soniox/speech-to-text-web/blob/master/examples/javascript/src/main.js
+   - is_final tokens: APPEND to finalText (sent only once, never repeated)
+   - non-final tokens: REPLACE entirely (provisional, may change)
+*/
+async function startSoniox(statusEl) {
+  // Ensure SDK is loaded (should already be pre-loaded)
+  if (!window.SonioxClient) {
+    const module = await import('https://unpkg.com/@soniox/speech-to-text-web?module');
+    window.SonioxClient = module.SonioxClient;
+  }
+
+  // Reset transcript state
+  sonioxFinalText = '';
+  sonioxNonFinalText = '';
+
+  sonioxClient = new window.SonioxClient({
+    apiKey: async () => {
+      // Use cached token if available and not expired
+      if (cachedSonioxToken && Date.now() < sonioxTokenExpiry) {
+        return cachedSonioxToken;
+      }
+      const data = await api('GET', '/api/soniox-token');
+      cachedSonioxToken = data.apiKey;
+      sonioxTokenExpiry = Date.now() + 8 * 60 * 1000;
+      return data.apiKey;
+    },
+  });
+
+  sonioxClient.start({
+    model: 'stt-rt-preview',
+    languageHints: ['ko', 'en'],
+    enableLanguageIdentification: true,
+    enableEndpointDetection: true,
+
+    onStarted: () => {
+      console.log('[Soniox] Connected, streaming audio');
+      statusEl.textContent = '';
+      const badge = $('liveBadge');
+      if (badge) badge.hidden = false;
+    },
+
+    // Official Soniox pattern: final tokens append, non-final tokens replace
+    onPartialResult: (result) => {
+      if (!result.tokens || result.tokens.length === 0) return;
+
+      let newNonFinal = '';
+      for (const token of result.tokens) {
+        if (token.text === '<end>') continue;
+        if (token.is_final) {
+          sonioxFinalText += token.text;
+        } else {
+          newNonFinal += token.text;
+        }
+      }
+      sonioxNonFinalText = newNonFinal;
+      renderSonioxTranscript();
+    },
+
+    onFinished: () => {
+      console.log('[Soniox] Finished');
+      // Move any remaining non-final text to final
+      if (sonioxNonFinalText) {
+        sonioxFinalText += sonioxNonFinalText;
+        sonioxNonFinalText = '';
+        renderSonioxTranscript();
+      }
+    },
+
+    onError: (s, msg, code) => {
+      console.error('[Soniox] Error:', s, msg, code);
+      statusEl.textContent = '변환 오류';
+    },
+  });
+}
+
+function stopSoniox() {
+  if (sonioxClient) {
+    sonioxClient.stop();
+    sonioxClient = null;
+  }
+  // Move any remaining non-final to final
+  if (sonioxNonFinalText) {
+    sonioxFinalText += sonioxNonFinalText;
+    sonioxNonFinalText = '';
+  }
+  const badge = $('liveBadge');
+  if (badge) badge.hidden = true;
+}
+
+/* ── OpenAI batch fallback ── */
+function getMimeType() {
+  if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
+  if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+  return '';
+}
+
+async function transcribeAccumulated(statusEl, isFinal) {
+  if (processingTranscribe) return;
+  if (allChunks.length === 0) return;
+  processingTranscribe = true;
+  try {
+    const blob = new Blob(allChunks, { type: getMimeType() || 'audio/webm' });
+    if (blob.size < 1000) { processingTranscribe = false; return; }
+    if (statusEl) statusEl.textContent = isFinal ? '마무리 중...' : '변환 중...';
+    const fd = new FormData();
+    fd.append('audio', blob, 'recording.webm');
+    const res = await fetch('/api/transcribe', { method: 'POST', body: fd, headers: { 'X-Auth-Token': authToken } });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.text) {
+      const newText = data.text.trim();
+      if (newText && newText !== lastTranscribedText) {
+        const ta = $('transcription');
+        ta.value = preRecordText ? preRecordText + '\n' + newText : newText;
+        ta.scrollTop = ta.scrollHeight;
+        lastTranscribedText = newText;
+        syncDisplayFromTextarea();
+      }
+      if (statusEl && !isFinal) statusEl.textContent = '';
+    } else if (!res.ok) {
+      console.error('[Transcribe] Failed:', data?.error || res.status);
+    }
+  } catch (err) {
+    console.error('[Transcribe] Error:', err.message);
+  }
+  processingTranscribe = false;
+}
+
+/* ── Main setup ── */
+let useSoniox = null; // null = not checked yet, true/false after check
 
 function setupRecording() {
   const btn = $('btnRecord'), timer = $('recordTimer'), status = $('recordStatus');
+
   btn.addEventListener('click', async () => {
     if (recording) {
-      recorder.stop(); btn.classList.remove('recording');
-      btn.querySelector('.record-label').textContent = '녹음';
-      clearInterval(timerInterval); status.textContent = '처리 중...'; recording = false; return;
+      // ── Stop ──
+      recording = false;
+      btn.classList.remove('recording');
+      btn.querySelector('.record-label').textContent = '녹음 시작';
+      clearInterval(timerInterval);
+
+      if (useSoniox) {
+        stopSoniox();
+        renderSonioxTranscript(); // final render without cursor
+        status.textContent = '완료!';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+      } else {
+        clearInterval(transcribeTimer);
+        const badge = $('liveBadge');
+        if (badge) badge.hidden = true;
+        if (recorder && recorder.state !== 'inactive') recorder.stop();
+        if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+        status.textContent = '마무리 중...';
+        await new Promise(r => setTimeout(r, 500));
+        await transcribeAccumulated(status, true);
+        status.textContent = '완료!';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+      }
+      return;
     }
+
+    // ── Start ──
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      recorder = new MediaRecorder(stream); chunks = [];
-      recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        status.textContent = '변환 중...';
-        try {
-          const fd = new FormData(); fd.append('audio', blob, 'recording.webm');
-          const res = await fetch('/api/transcribe', { method: 'POST', body: fd, headers: { 'X-Auth-Token': authToken } });
-          const data = await res.json().catch(()=>({}));
-          if (!res.ok) throw new Error(data?.error || 'Failed');
-          const prev = $('transcription').value.trim();
-          $('transcription').value = prev ? prev + '\n' + data.text : data.text;
-          status.textContent = '완료!';
-          setTimeout(() => { status.textContent = ''; }, 3000);
-        } catch (err) { status.textContent = '실패: ' + (err.message || ''); }
-      };
-      recorder.start(); recording = true; recordStart = Date.now();
-      btn.classList.add('recording'); btn.querySelector('.record-label').textContent = '중지';
-      status.textContent = ''; timer.textContent = '00:00';
+      recording = true;
+      recordStart = Date.now();
+      preRecordText = $('transcription').value.trim();
+
+      btn.classList.add('recording');
+      btn.querySelector('.record-label').textContent = '중지하기';
+      status.textContent = '연결 중...';
+      timer.textContent = '00:00';
       timerInterval = setInterval(() => { timer.textContent = fmtTime(Date.now() - recordStart); }, 500);
-    } catch { status.textContent = '마이크 오류'; }
+
+      // If Soniox hasn't been checked yet, try pre-loading now (should already be done at boot)
+      if (useSoniox === null) {
+        await preloadSoniox();
+        console.log('[Recording] Soniox available:', useSoniox);
+      }
+
+      if (useSoniox) {
+        // ── Soniox real-time ──
+        await startSoniox(status);
+      } else {
+        // ── OpenAI chunked fallback ──
+        console.log('[Recording] Using OpenAI chunked fallback');
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        allChunks = [];
+        lastTranscribedText = '';
+        processingTranscribe = false;
+
+        const badge = $('liveBadge');
+        if (badge) badge.hidden = false;
+        status.textContent = '';
+
+        const mimeType = getMimeType();
+        recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : {});
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) allChunks.push(e.data); };
+        recorder.onerror = () => { status.textContent = '녹음 오류'; };
+        recorder.start(500);
+
+        transcribeTimer = setInterval(() => {
+          if (recording && !processingTranscribe) transcribeAccumulated(status, false);
+        }, CHUNK_INTERVAL_MS);
+      }
+    } catch (err) {
+      console.error('[Recording] Error:', err);
+      recording = false;
+      btn.classList.remove('recording');
+      btn.querySelector('.record-label').textContent = '녹음 시작';
+      clearInterval(timerInterval);
+      status.textContent = '오류: ' + (err.message || '마이크 오류');
+    }
   });
 }
 
@@ -257,6 +518,28 @@ async function boot() {
   booted = true;
 
   setupRecording();
+
+  // Pre-load Soniox SDK + token in background for instant recording start
+  preloadSoniox().catch(() => {});
+
+  // Allow clicking transcript display to edit manually
+  const transcriptDisplay = $('transcriptDisplay');
+  const transcriptionTa = $('transcription');
+  transcriptDisplay.addEventListener('click', () => {
+    if (recording) return; // don't allow editing while recording
+    transcriptionTa.classList.add('editing');
+    transcriptionTa.value = transcriptionTa.value; // sync
+    transcriptionTa.focus();
+  });
+  transcriptionTa.addEventListener('blur', () => {
+    transcriptionTa.classList.remove('editing');
+    syncDisplayFromTextarea();
+  });
+  transcriptionTa.addEventListener('input', () => {
+    // live sync while user edits
+    syncDisplayFromTextarea();
+  });
+
   $('globalMemo').value = localStorage.getItem(LOCAL.globalMemo) || '';
   await loadStudents();
   await loadHistory();
@@ -437,6 +720,7 @@ async function boot() {
     $('btnFinalSave').disabled = true;
     $('btnFinalSave').classList.remove('saved');
     $('studentPastComments').innerHTML = '<p class="empty-state">학생을 선택하면 저장된 코멘트가 표시됩니다.</p>';
+    $('transcriptDisplay').innerHTML = '<span class="voice-placeholder">말하기 시작하세요. 한국어와 영어를 자유롭게 섞어도 됩니다.</span>';
     setStatus('');
     toggleEditSection();
     renderChips();
