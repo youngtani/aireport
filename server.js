@@ -244,58 +244,7 @@ app.post('/api/comments', authMiddleware, async (req, res) => {
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
-/* ── Soniox temporary API key for browser real-time transcription ── */
-function getSonioxKey() {
-  dotenv.config();
-  const key = process.env.SONIOX_API_KEY;
-  return typeof key === 'string' ? key.trim() : '';
-}
-
-app.get('/api/soniox-token', authMiddleware, async (req, res) => {
-  try {
-    const sonioxKey = getSonioxKey();
-    if (!sonioxKey) return res.status(400).json({ error: 'SONIOX_API_KEY is not set.' });
-
-    // Try to get a temporary API key first (preferred for security)
-    try {
-      const response = await fetch('https://api.soniox.com/v1/auth/temporary-api-key', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${sonioxKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          usage_type: 'transcribe_websocket',
-          expires_in_seconds: 600,
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.api_key) {
-          console.log('[Soniox] Temporary key generated successfully');
-          return res.json({ apiKey: data.api_key });
-        }
-      }
-      const errBody = await response.text().catch(() => '');
-      console.warn('[Soniox] Temporary key endpoint returned', response.status, errBody);
-    } catch (tempErr) {
-      console.warn('[Soniox] Temporary key fetch failed:', tempErr.message);
-    }
-
-    // Fallback: return the API key directly (still works with Soniox SDK)
-    console.log('[Soniox] Using direct API key as fallback');
-    return res.json({ apiKey: sonioxKey });
-  } catch (err) {
-    console.error('[Soniox] Token error:', err.message);
-    return res.status(500).json({ error: err.message || 'Failed to get Soniox token' });
-  }
-});
-
-/* ── Transcription (batch fallback via OpenAI) ── */
-const TRANSCRIPTION_PROMPT = `This is a Korean tutoring session (독서학원 수업). The teacher and student freely mix Korean (한국어) and English in the SAME sentence.
-Examples of what they say: "오늘 읽은 book은 Charlotte's Web이야", "character가 누구야?", "setting은 어디야?", "vocabulary 단어 중에 abandon이 뭐야?"
-CRITICAL: Transcribe EXACTLY as spoken — keep Korean parts in Korean (한글) and English parts in English. Do NOT translate. Do NOT convert one language to the other. Mixed sentences are normal and expected.`;
-
+/* ── Transcription ── */
 app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, res) => {
   try {
     if (!getApiKey()) return res.status(400).json({ error: 'OPENAI_API_KEY is not set.' });
@@ -303,39 +252,79 @@ app.post('/api/transcribe', authMiddleware, upload.single('audio'), async (req, 
     const client = createClient();
     const file = new File([req.file.buffer], req.file.originalname || 'audio.webm', { type: req.file.mimetype || 'audio/webm' });
     const transcription = await client.audio.transcriptions.create({
-      model: 'gpt-4o-transcribe',
+      model: 'whisper-1',
       file,
-      prompt: TRANSCRIPTION_PROMPT,
+      prompt: '이 수업에서는 한국어와 English를 함께 사용합니다. 영어 단어와 문장은 영어 그대로 transcribe 해주세요.',
     });
     return res.json({ text: transcription.text || '' });
   } catch (err) { return res.status(500).json({ error: err.message || 'Transcription error' }); }
 });
 
 /* ── Generate comment ── */
-const SYSTEM_PROMPT = `당신은 독서학원 선생님이 학부모에게 보내는 수업 코멘트를 작성하는 전문 작가입니다.
+const SYSTEM_PROMPT = `당신은 독서학원(영어 리딩 학원) 선생님이 학부모에게 보내는 수업 코멘트를 작성합니다.
+아래의 스타일 가이드와 예시를 정확히 따라 작성하세요.
 
-아래 규칙을 반드시 따르세요:
+═══ 스타일 가이드 ═══
 
-1. 대화 내용을 꼼꼼히 읽고 핵심 정보를 파악하세요: 책 제목, 학생이 설명한 줄거리, 등장인물, 배경, 배운 어휘, 학생이 작성한 문장, 시험 점수, 특별한 순간 등.
+[구조 - 반드시 이 순서를 따를 것]
+1. 도입: "[이름]은/는 오늘 [책 제목]을/를 읽었습니다." 또는 "[이름]은/는 오늘 [책 제목]을/를 읽으며 [범위]까지 진행했습니다."
+2. 줄거리 이해: 학생이 이해하고 설명해 준 내용을 구체적으로 서술. "~장면까지 잘 이해하고 설명해 주었습니다" 패턴 사용.
+3. 스토리텔링/인상 깊은 부분: 학생이 가장 인상 깊었던 장면이나 느낀 점을 영어로 표현한 내용 언급.
+4. 북리포트/에세이 활동 (가장 중요): 어떤 질문에 답했는지, 어떤 내용을 글로 정리했는지, 문장 확장이나 리라이팅을 어떻게 했는지 구체적으로 서술.
+5. 문법/어휘 학습: 배운 문법 포인트(시제, 전치사, 접속사, 관계대명사 등)와 새로운 어휘를 구체적으로 언급. 반드시 학생이 쓴 영어 문장을 "큰따옴표"로 인용.
+6. 마무리: 학생 이름을 부르며 격려. "오늘도 수고 많았어요~", "잘 따라와줘서 고마워요! ^^" 등.
 
-2. 아래 형식을 따르세요:
-   - "오늘 [이름]은/는 [책 제목]을/를 읽었습니다." 로 시작
-   - 책의 내용에 대한 간단한 소개
-   - 학생이 정확히 파악한 것들 (등장인물, 배경 등)
-   - 배운 어휘 단어들
-   - 에세이 관련 내용 (매일 에세이를 쓰는데, 이 부분이 가장 중요합니다. 에세이에서 어떤 내용을 썼는지, 어떤 피드백을 받았는지 자세히 다뤄주세요)
-   - 학생이 만든 문장들
-   - 마지막은 학생의 이름을 부르며 격려하는 멘트로 마무리
+[톤과 표현]
+- 따뜻하고 구체적. 학부모가 읽었을 때 "오늘 아이가 뭘 했는지" 선명하게 보여야 함.
+- 자연스러운 한국어 문어체. "~해주었습니다", "~살펴보았습니다", "~진행하였습니다", "~함께 배워보았습니다" 스타일.
+- 격려 표현: "기특했습니다", "잘 정리해 주었습니다", "잘 따라와 주었습니다" 등 자연스럽게 섞기.
+- 마무리에 ~, ^^, ! 자연스럽게 사용. 이모지는 사용 금지.
+- 영어 책 제목, 단어, 문장은 반드시 영어 그대로 표기.
 
-3. 톤은 따뜻하고 격려하며, 학부모에게 오늘 아이가 수업에서 무엇을 했는지 구체적으로 보여주세요.
+[형식]
+- 한 문단 또는 2-3개의 짧은 문단. 줄바꿈 최소화.
+- 학생이 쓴 영어 문장을 인용할 때 큰따옴표 사용: "He solved many problems."
+- 어휘를 나열할 때: lawyer, courthouse, judge와 같은 / slyly, clumsy와 같은
+- 문법 설명: "A 대신 B와 같이 보다 정확하고 구체적인 단어를 사용해보았습니다" 패턴
 
-4. 출력은 한 개의 문단으로 작성하세요. 줄바꿈 최소화. 이모지/특수문자 사용 금지.
+[금지사항]
+- 이모지 사용 금지 (^^, ~, ! 는 허용)
+- 과도한 칭찬 나열 금지. 구체적 사실 위주로 서술.
+- 과거 코멘트의 내용을 그대로 반복 금지. 오늘 수업 기준으로 새로 작성.
+- 수업에서 다루지 않은 내용 지어내기 금지. 제공된 대화/메모에 있는 내용만 활용.
 
-5. 자연스러운 한국어로 작성하되, 영어 책 제목, 단어, 문장은 영어 그대로 표기하세요.
+═══ 참고 예시 (톤과 구조를 따라할 것) ═══
 
-6. 과거 코멘트가 제공된 경우, 톤과 스타일의 일관성을 유지하되 내용은 반드시 오늘 수업 기준으로 새로 작성하세요. 과거 코멘트의 내용을 그대로 반복하지 마세요.
+<example_1>
+예나는 오늘 Fantastic Mr Fox를 읽으며 Chapter 1-7까지 진행했습니다. 이야기의 앞부분에서 Mr Fox가 가족과 함께 굴에 살며 밤마다 먹이를 구하러 나가는 내용과, 세 농부 Boggis, Bunce, Bean이 Mr Fox를 잡기 위해 계획을 세우는 흐름을 잘 이해하고 설명해 주었습니다. 북리포트 시간에는 전체 줄거리를 보다 매끄럽게 다듬으며 리라이팅을 진행했고, 사건의 흐름을 순서에 맞게 정리하는 연습도 함께 이루어졌습니다. 문법적으로는 시제를 과거형으로 일치시키도록 문장을 수정하였으며, slyly, clumsy와 같은 책 속 어휘를 활용해 주어+동사 구조의 간결한 문장을 함께 작성해 보며 기본 문장 형식을 복습하였습니다. 오늘은 새로운 표현을 평소보다 조금 많이 배웠지만 끝까지 집중하며 잘 따라와주어 정말 기특했습니다! ^^
+</example_1>
 
-7. 전체 메모나 학생 메모가 제공된 경우, 해당 정보를 참고하여 더 맞춤형 코멘트를 작성하세요.`;
+<example_2>
+예나는 오늘 Stone Fox를 완독했습니다. 이야기의 마지막 부분에서 썰매견 대회에 참가하게 되고, 결국 주인공 강아지 Searchlight가 죽게 되는 장면까지 잘 이해하고 설명해주었습니다.
+스토리텔링 시간에 가장 인상 깊었던 부분을 물어보니, 앞부분에서 주인공이 편찮으신 할아버지를 도와드리는 장면이 기억에 남았다고 영어로 잘 표현해주었습니다. 예나가 이야기 속 인물들의 상황과 마음을 헤아리면서 읽었다는 점을 알 수 있었습니다. ^^
+북리포트에선 How did the story make you feel?라는 질문에 주인공 강아지 searchlight 이 죽는 부분이 슬펐다고 sad라고 답해주어서 I felt sad because Searchlight died in the end.와 같이 문장으로 확장해보는 연습도 함께 진행했습니다. 또한 단순히 did와 같은 표현보다는 participated와 같이 보다 정확하고 구체적인 단어를 사용해보았습니다. Stone Fox 이후에는 Roald Dahl 작가의 Fantastic Mr. Fox를 진행할 예정이며, 오늘은 챕터 2까지 읽어보았습니다. 예나 오늘도 수고 많았어요~
+</example_2>
+
+<example_3>
+수는 오늘 Abe Lincoln's Hat을 읽으며 아브라함 링컨의 이야기를 살펴보았습니다. 다소 난이도가 있는 내용이었지만 끝까지 집중하며 잘 따라와 주었고, 줄거리도 스스로 잘 정리해 주었습니다. "He solved many problems, for example, people argued about animals, land and money."와 같이 for example을 활용해 예를 덧붙이며 문장을 확장한 점이 정말 기특했습니다. 오늘은 lawyer, courthouse, judge와 같은 관련 어휘도 함께 배우며 내용 이해를 도왔습니다. 오늘 단어 공부까지 열심히 해준 수 정말 수고 많았어요!
+</example_3>
+
+<example_4>
+오늘은 Mouse Tales를 읽었습니다. 이 책은 7가지의 짧은 이야기가 묶여 있는 구성인데, 그중에서 수가 가장 인상 깊었다고 한 "Clouds" 이야기를 골라 설명해주었고, 그 내용에 대해 글로도 잘 정리해주었습니다.
+오늘은 특히 about (~에 관한) 표현을 배워보았습니다.
+The book is about animals.
+The movie is about history.
+와 같은 문장을 만들어보며, about이 '~에 대한 내용'을 설명할 때 사용된다는 점을 익혔습니다. 배운 표현을 바로 문장에 적용해보는 모습이 좋았습니다. 오늘도 차분하게 열심히 수업한 수, 정말 수고 많았어요~ ^^
+</example_4>
+
+<example_5>
+지안이는 The Mysterious Benedict Society를 완독하고 AR 테스트에서 Reading 18/20, Vocabulary 16/20으로 안정적인 이해도를 보여주었습니다. 네 명의 아이들이 베네딕트 씨에게 선발되어 각자의 능력을 바탕으로 함께 임무를 수행하는 이야기를 구조적으로 잘 이해하고, 인물들의 특징과 역할까지 연결해 설명해 주었습니다.
+북리포트 시간에는 관계대명사를 활용해 문장을 확장하는 연습을 했고, while that과 같이 어색했던 표현을 while they were studying on the island로 구체적으로 수정하며 문장의 정확도와 자연스러움을 높였습니다. 또한 문장을 쓸 때 시제와 주어를 맞추는 부분도 함께 점검하며 전체적인 문장 완성도를 높였습니다. 지안이 오늘도 수고 많았어요! ^^
+</example_5>
+
+═══ 작성 지침 ═══
+위 예시들의 톤, 단어 선택, 문장 구조, 마무리 방식을 충실히 따라 작성하세요.
+제공된 수업 대화 내용과 메모를 바탕으로, 오늘 수업에서 실제로 다룬 내용만 사용하여 코멘트를 작성하세요.`;
 
 async function generateOne({ studentName, bookTitle, pagesOrChapter, transcription, tutorNotes, studentMemo, globalMemo, pastComments }) {
   const client = createClient();
@@ -350,6 +339,7 @@ async function generateOne({ studentName, bookTitle, pagesOrChapter, transcripti
     pastComments && pastComments.length
       ? `[이 학생의 과거 코멘트 (참고용)]\n${pastComments.join('\n---\n')}`
       : null,
+      
   ].filter(Boolean).join('\n\n');
 
   const response = await client.responses.create({
@@ -419,9 +409,6 @@ if (!process.env.VERCEL) {
     console.log(`OPENAI_API_KEY: ${getApiKey() ? 'OK' : 'MISSING'}`);
     console.log(`Firebase: ${db ? 'OK' : 'MISSING'}`);
     console.log(`Tutors: Firebase-managed`);
-    console.log(`Soniox: ${getSonioxKey() ? 'OK' : 'MISSING (will use OpenAI fallback)'}`);
-    console.log(`Transcription: ${getSonioxKey() ? 'Soniox real-time' : 'OpenAI chunked'}`);
-
   });
   server.on('error', err => {
     if (err?.code === 'EADDRINUSE') { console.error(`Port ${port} in use`); process.exit(1); }
